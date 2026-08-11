@@ -1,0 +1,52 @@
+"use client";
+
+import { useCallback, useState } from "react";
+import { summarizeTranscript } from "@/lib/openrouter/client";
+import type { TranscriptSegment } from "@/lib/stt/types";
+
+export type SummaryStatus = "idle" | "loading" | "ready" | "error";
+
+function formatTranscriptForPrompt(segments: TranscriptSegment[]): string {
+  return segments
+    .slice()
+    .sort((a, b) => a.start - b.start)
+    .map((seg) => {
+      const minutes = Math.floor(seg.start / 60);
+      const seconds = Math.floor(seg.start % 60);
+      const timestamp = `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+      const speaker = seg.channel === "mic" ? "You" : "Participants";
+      return `[${timestamp}] ${speaker}: ${seg.text}`;
+    })
+    .join("\n");
+}
+
+export function useSummary() {
+  const [status, setStatus] = useState<SummaryStatus>("idle");
+  const [summary, setSummary] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const generate = useCallback(
+    async (segments: TranscriptSegment[], apiKey: string, model: string) => {
+      setStatus("loading");
+      setErrorMessage(null);
+      try {
+        const transcriptText = formatTranscriptForPrompt(segments);
+        const result = await summarizeTranscript({ apiKey, model, transcriptText });
+        setSummary(result);
+        setStatus("ready");
+      } catch (error) {
+        setStatus("error");
+        setErrorMessage(error instanceof Error ? error.message : "Summarization failed");
+      }
+    },
+    []
+  );
+
+  const reset = useCallback(() => {
+    setStatus("idle");
+    setSummary(null);
+    setErrorMessage(null);
+  }, []);
+
+  return { status, summary, errorMessage, generate, reset };
+}

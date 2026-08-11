@@ -1,0 +1,127 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { WhisperEngine } from "@/lib/stt/whisperEngine";
+import { loadModel, type ModelFetchProgress } from "@/lib/stt/modelStore";
+import type { TranscriptSegment } from "@/lib/stt/types";
+import type { AudioChannelLabel, PCMChunk } from "@/lib/audio/types";
+
+const MODEL_URL =
+  process.env.NEXT_PUBLIC_WHISPER_MODEL_URL ??
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
+const SAMPLE_RATE = 16000;
+const WINDOW_SAMPLES = SAMPLE_RATE * 5; // ~5s rolling window per channel
+
+export type ModelStatus = "idle" | "downloading" | "initializing" | "ready" | "error";
+
+export function useTranscription() {
+  const engineRef = useRef<WhisperEngine | null>(null);
+  const windowBuffers = useRef<Record<AudioChannelLabel, Float32Array[]>>({
+    mic: [],
+    participants: [],
+  });
+  const windowSampleCount = useRef<Record<AudioChannelLabel, number>>({
+    mic: 0,
+    participants: 0,
+  });
+  const windowStart = useRef<Record<AudioChannelLabel, number>>({
+    mic: 0,
+    participants: 0,
+  });
+
+  const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
+  const [downloadProgress, setDownloadProgress] = useState<ModelFetchProgress | null>(null);
+  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function init() {
+      setModelStatus("downloading");
+      try {
+        const modelBytes = await loadModel(MODEL_URL, (progress) => {
+          if (!cancelled) setDownloadProgress(progress);
+        });
+        if (cancelled) return;
+
+        setModelStatus("initializing");
+        const engine = new WhisperEngine();
+        await engine.loadModel(modelBytes);
+        if (cancelled) {
+          engine.terminate();
+          return;
+        }
+        engineRef.current = engine;
+        setModelStatus("ready");
+      } catch (error) {
+        if (!cancelled) {
+          setModelStatus("error");
+          setErrorMessage(error instanceof Error ? error.message : "Failed to load model");
+        }
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+      engineRef.current?.terminate();
+      engineRef.current = null;
+    };
+  }, []);
+
+  const flushWindow = useCallback((channel: AudioChannelLabel) => {
+    const engine = engineRef.current;
+    const parts = windowBuffers.current[channel];
+    const sampleCount = windowSampleCount.current[channel];
+    if (!engine || parts.length === 0 || sampleCount === 0) return;
+
+    const audio = new Float32Array(sampleCount);
+    let offset = 0;
+    for (const part of parts) {
+      audio.set(part, offset);
+      offset += part.length;
+    }
+    const offsetSeconds = windowStart.current[channel];
+
+    windowBuffers.current[channel] = [];
+    windowSampleCount.current[channel] = 0;
+    windowStart.current[channel] = offsetSeconds + audio.length / SAMPLE_RATE;
+
+    engine
+      .transcribe({ channel, audio, offsetSeconds })
+      .then((newSegments) => {
+        if (newSegments.length === 0) return;
+        setSegments((prev) => [...prev, ...newSegments].sort((a, b) => a.start - b.start));
+      })
+      .catch((error) => {
+        setErrorMessage(error instanceof Error ? error.message : "Transcription failed");
+      });
+  }, []);
+
+  const pushChunk = useCallback(
+    (chunk: PCMChunk) => {
+      windowBuffers.current[chunk.channel].push(chunk.samples);
+      windowSampleCount.current[chunk.channel] += chunk.samples.length;
+      if (windowSampleCount.current[chunk.channel] >= WINDOW_SAMPLES) {
+        flushWindow(chunk.channel);
+      }
+    },
+    [flushWindow]
+  );
+
+  const flushAll = useCallback(() => {
+    flushWindow("mic");
+    flushWindow("participants");
+  }, [flushWindow]);
+
+  const reset = useCallback(() => {
+    windowBuffers.current = { mic: [], participants: [] };
+    windowSampleCount.current = { mic: 0, participants: 0 };
+    windowStart.current = { mic: 0, participants: 0 };
+    setSegments([]);
+    setErrorMessage(null);
+  }, []);
+
+  return { modelStatus, downloadProgress, segments, errorMessage, pushChunk, flushAll, reset };
+}
