@@ -201,6 +201,12 @@ export default function Home() {
           errorMessage={transcription.errorMessage}
         />
 
+        {transcription.modelStatus !== "error" && transcription.errorMessage && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            {transcription.errorMessage}
+          </div>
+        )}
+
         {!state.participantsSupported && (
           <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
             This browser doesn&apos;t support tab/system audio sharing — you&apos;ll only be able to

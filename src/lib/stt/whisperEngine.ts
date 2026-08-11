@@ -31,12 +31,30 @@ interface PendingJob {
   offsetSeconds: number;
 }
 
+// Generous headroom above any observed real transcription time for a single
+// ~3s window (single-threaded CPU inference of that much audio typically
+// finishes in a few seconds) — this exists specifically to catch a stuck
+// multi-threaded WASM worker, which in some environments hangs forever with
+// zero error (see plan.md §4.7). A false-positive timeout just costs one
+// transcription window; a real hang with no timeout would freeze the app.
+const TRANSCRIBE_TIMEOUT_MS = 25000;
+
+/** Thrown when a transcribe() call hits TRANSCRIBE_TIMEOUT_MS — signals the
+ * worker is stuck and the caller should treat this engine as dead. */
+export class EngineTimeoutError extends Error {
+  constructor() {
+    super("Transcription worker stopped responding (multi-threaded WASM hang)");
+    this.name = "EngineTimeoutError";
+  }
+}
+
 /** Thin wrapper around the whisper.cpp WASM Worker — see public/workers/whisper-worker.js. */
 export class WhisperEngine {
   private worker: Worker;
   private readyPromise: Promise<void>;
   private jobCounter = 0;
   private pendingJobs = new Map<string, PendingJob>();
+  private dead = false;
   // transcribe() runs synchronously inside the worker (see whisper-worker.js)
   // and blocks its event loop for the job's duration, so this queue just
   // serializes calls instead of piling up postMessage calls the worker can't
@@ -103,6 +121,10 @@ export class WhisperEngine {
   }
 
   transcribe(options: TranscribeOptions): Promise<TranscriptSegment[]> {
+    if (this.dead) {
+      return Promise.reject(new EngineTimeoutError());
+    }
+
     const jobId = `job-${++this.jobCounter}`;
     const run = () =>
       new Promise<TranscriptSegment[]>((resolve, reject) => {
@@ -120,12 +142,35 @@ export class WhisperEngine {
         });
       });
 
-    const result = this.queue.then(run);
-    this.queue = result.catch(() => undefined);
-    return result;
+    const withTimeout = this.queue.then(
+      () =>
+        new Promise<TranscriptSegment[]>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            this.pendingJobs.delete(jobId);
+            this.dead = true;
+            this.worker.terminate(); // the worker's JS thread is stuck (see TRANSCRIBE_TIMEOUT_MS) — nothing running in it can respond to a message, so kill it outright
+            reject(new EngineTimeoutError());
+          }, TRANSCRIBE_TIMEOUT_MS);
+
+          run().then(
+            (segments) => {
+              clearTimeout(timer);
+              resolve(segments);
+            },
+            (error) => {
+              clearTimeout(timer);
+              reject(error);
+            }
+          );
+        })
+    );
+
+    this.queue = withTimeout.catch(() => undefined);
+    return withTimeout;
   }
 
   terminate(): void {
+    this.dead = true;
     this.worker.terminate();
   }
 }

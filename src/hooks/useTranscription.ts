@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { WhisperEngine } from "@/lib/stt/whisperEngine";
+import { WhisperEngine, EngineTimeoutError } from "@/lib/stt/whisperEngine";
 import { loadModel, type ModelFetchProgress } from "@/lib/stt/modelStore";
 import type { TranscriptSegment } from "@/lib/stt/types";
 import type { AudioChannelLabel, PCMChunk } from "@/lib/audio/types";
@@ -18,6 +18,15 @@ export type ModelStatus = "idle" | "downloading" | "initializing" | "ready" | "e
 
 export function useTranscription(modelUrl: string) {
   const engineRef = useRef<WhisperEngine | null>(null);
+  // Multi-threaded by default (one thread per core, capped); an
+  // EngineTimeoutError (see whisperEngine.ts) downgrades this to 1 and
+  // forces a full restart — a hung multi-threaded WASM worker degrades to
+  // slow-but-working instead of freezing transcription forever.
+  const nthreadsRef = useRef<number>(
+    typeof navigator !== "undefined" ? Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8)) : 4
+  );
+  const [restartToken, setRestartToken] = useState(0);
+
   const windowBuffers = useRef<Record<AudioChannelLabel, Float32Array[]>>({
     mic: [],
     participants: [],
@@ -42,6 +51,11 @@ export function useTranscription(modelUrl: string) {
     async function init() {
       setModelStatus("downloading");
       setDownloadProgress(null);
+      // Deliberately not clearing errorMessage here: when this re-runs after
+      // an EngineTimeoutError restart (see flushWindow's catch below), the
+      // "restarting single-threaded" notice needs to stay visible through
+      // the whole re-init, not flash and vanish the instant it starts.
+      // Cleared below only once we're actually back to a working state.
       try {
         const modelBytes = await loadModel(modelUrl, (progress) => {
           if (!cancelled) setDownloadProgress(progress);
@@ -57,6 +71,7 @@ export function useTranscription(modelUrl: string) {
         }
         engineRef.current = engine;
         setModelStatus("ready");
+        setErrorMessage(null);
       } catch (error) {
         if (!cancelled) {
           setModelStatus("error");
@@ -71,7 +86,7 @@ export function useTranscription(modelUrl: string) {
       engineRef.current?.terminate();
       engineRef.current = null;
     };
-  }, [modelUrl]);
+  }, [modelUrl, restartToken]);
 
   const flushWindow = useCallback((channel: AudioChannelLabel) => {
     const engine = engineRef.current;
@@ -92,12 +107,20 @@ export function useTranscription(modelUrl: string) {
     windowStart.current[channel] = offsetSeconds + audio.length / SAMPLE_RATE;
 
     engine
-      .transcribe({ channel, audio, offsetSeconds })
+      .transcribe({ channel, audio, offsetSeconds, nthreads: nthreadsRef.current })
       .then((newSegments) => {
         if (newSegments.length === 0) return;
         setSegments((prev) => [...prev, ...newSegments].sort((a, b) => a.start - b.start));
       })
       .catch((error) => {
+        if (error instanceof EngineTimeoutError && nthreadsRef.current > 1) {
+          nthreadsRef.current = 1;
+          setErrorMessage(
+            "Multi-threaded transcription stopped responding — restarting single-threaded (slower, but working)."
+          );
+          setRestartToken((t) => t + 1);
+          return;
+        }
         setErrorMessage(error instanceof Error ? error.message : "Transcription failed");
       });
   }, []);
