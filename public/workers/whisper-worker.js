@@ -48,14 +48,12 @@ self.onmessage = async (event) => {
     }
     try {
       // Blocks this worker's event loop for the duration of the job — fine,
-      // this worker is already off the main/UI thread.
-      const segments = self.Module.transcribe(
-        ctxHandle,
-        msg.audio,
-        "en",
-        msg.nthreads || 1,
-        false
-      );
+      // this worker is already off the main/UI thread. Thread count is
+      // fixed at 1: the WASM build has no pthread support (disabled after a
+      // real user confirmed the multi-threaded build hangs even outside
+      // this project's sandboxed test environment — see plan.md §4.7),
+      // so anything higher would be a no-op anyway.
+      const segments = self.Module.transcribe(ctxHandle, msg.audio, "en", 1, false);
       self.postMessage({
         type: "transcribe-done",
         jobId: msg.jobId,

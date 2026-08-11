@@ -16,15 +16,14 @@ const WINDOW_SAMPLES = SAMPLE_RATE * 3;
 
 export type ModelStatus = "idle" | "downloading" | "initializing" | "ready" | "error";
 
+// Cap auto-restarts so a persistently broken engine surfaces a stable error
+// instead of silently retrying (each cycle costs ~25s+ for the watchdog to
+// fire) forever.
+const MAX_AUTO_RESTARTS = 2;
+
 export function useTranscription(modelUrl: string) {
   const engineRef = useRef<WhisperEngine | null>(null);
-  // Multi-threaded by default (one thread per core, capped); an
-  // EngineTimeoutError (see whisperEngine.ts) downgrades this to 1 and
-  // forces a full restart — a hung multi-threaded WASM worker degrades to
-  // slow-but-working instead of freezing transcription forever.
-  const nthreadsRef = useRef<number>(
-    typeof navigator !== "undefined" ? Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8)) : 4
-  );
+  const restartAttemptsRef = useRef(0);
   const [restartToken, setRestartToken] = useState(0);
 
   const windowBuffers = useRef<Record<AudioChannelLabel, Float32Array[]>>({
@@ -70,6 +69,7 @@ export function useTranscription(modelUrl: string) {
           return;
         }
         engineRef.current = engine;
+        restartAttemptsRef.current = 0; // fresh budget once actually recovered
         setModelStatus("ready");
         setErrorMessage(null);
       } catch (error) {
@@ -107,17 +107,15 @@ export function useTranscription(modelUrl: string) {
     windowStart.current[channel] = offsetSeconds + audio.length / SAMPLE_RATE;
 
     engine
-      .transcribe({ channel, audio, offsetSeconds, nthreads: nthreadsRef.current })
+      .transcribe({ channel, audio, offsetSeconds })
       .then((newSegments) => {
         if (newSegments.length === 0) return;
         setSegments((prev) => [...prev, ...newSegments].sort((a, b) => a.start - b.start));
       })
       .catch((error) => {
-        if (error instanceof EngineTimeoutError && nthreadsRef.current > 1) {
-          nthreadsRef.current = 1;
-          setErrorMessage(
-            "Multi-threaded transcription stopped responding — restarting single-threaded (slower, but working)."
-          );
+        if (error instanceof EngineTimeoutError && restartAttemptsRef.current < MAX_AUTO_RESTARTS) {
+          restartAttemptsRef.current += 1;
+          setErrorMessage("Local transcription stopped responding — restarting…");
           setRestartToken((t) => t + 1);
           return;
         }

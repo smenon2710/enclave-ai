@@ -45,7 +45,6 @@ export interface TranscribeOptions {
   channel: AudioChannelLabel;
   audio: Float32Array;
   offsetSeconds: number;
-  nthreads?: number;
 }
 
 interface PendingJob {
@@ -56,17 +55,20 @@ interface PendingJob {
 
 // Generous headroom above any observed real transcription time for a single
 // ~3s window (single-threaded CPU inference of that much audio typically
-// finishes in a few seconds) — this exists specifically to catch a stuck
-// multi-threaded WASM worker, which in some environments hangs forever with
-// zero error (see plan.md §4.7). A false-positive timeout just costs one
-// transcription window; a real hang with no timeout would freeze the app.
+// finishes in a few seconds). General-purpose defense-in-depth against a
+// stuck worker for *any* reason — the WASM build was multi-threaded for a
+// while (see plan.md §4.7 for why that was reverted after a real user
+// confirmed it hangs even outside this project's sandboxed build/test
+// environment), but a watchdog here is still cheap insurance regardless of
+// the build. A false-positive timeout just costs one transcription window;
+// a real hang with no timeout would freeze the app.
 const TRANSCRIBE_TIMEOUT_MS = 25000;
 
 /** Thrown when a transcribe() call hits TRANSCRIBE_TIMEOUT_MS — signals the
  * worker is stuck and the caller should treat this engine as dead. */
 export class EngineTimeoutError extends Error {
   constructor() {
-    super("Transcription worker stopped responding (multi-threaded WASM hang)");
+    super("Transcription worker stopped responding");
     this.name = "EngineTimeoutError";
   }
 }
@@ -163,7 +165,6 @@ export class WhisperEngine {
           jobId,
           channel: options.channel,
           audio: options.audio,
-          nthreads: options.nthreads ?? 1,
         });
       });
 
