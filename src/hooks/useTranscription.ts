@@ -34,15 +34,30 @@ export function useTranscription(modelUrl: string) {
     mic: 0,
     participants: 0,
   });
-  const windowStart = useRef<Record<AudioChannelLabel, number>>({
-    mic: 0,
-    participants: 0,
+  // Timestamp (AudioContext.currentTime, from the shared clock stamped onto
+  // every PCMChunk in the worklet — see capture.ts) of the *first* chunk in
+  // each channel's current window. Anchoring to that shared clock, rather
+  // than a per-channel "seconds of audio captured so far" counter, matters
+  // because the two channels don't start recording at the same wall-clock
+  // moment — participants capture only begins once the share-picker dialog
+  // is granted, which can be well after mic capture started. A counter that
+  // starts both channels at 0 would misorder segments across channels by
+  // however long that dialog took.
+  const windowStartTimestamp = useRef<Record<AudioChannelLabel, number | null>>({
+    mic: null,
+    participants: null,
   });
 
   const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
   const [downloadProgress, setDownloadProgress] = useState<ModelFetchProgress | null>(null);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Number of transcribe() calls dispatched but not yet resolved/rejected —
+  // lets callers show a "still finalizing" state instead of assuming the
+  // transcript is complete the instant recording stops (WhisperEngine
+  // serializes calls through one queue, so a backlog from live transcription
+  // running behind real-time doesn't clear just because flushAll() ran).
+  const [pendingJobCount, setPendingJobCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,12 +115,15 @@ export function useTranscription(modelUrl: string) {
       audio.set(part, offset);
       offset += part.length;
     }
-    const offsetSeconds = windowStart.current[channel];
+    // Falls back to 0 only if somehow flushed with no chunk ever recorded
+    // (shouldn't happen given the sampleCount > 0 guard above).
+    const offsetSeconds = windowStartTimestamp.current[channel] ?? 0;
 
     windowBuffers.current[channel] = [];
     windowSampleCount.current[channel] = 0;
-    windowStart.current[channel] = offsetSeconds + audio.length / SAMPLE_RATE;
+    windowStartTimestamp.current[channel] = null;
 
+    setPendingJobCount((c) => c + 1);
     engine
       .transcribe({ channel, audio, offsetSeconds })
       .then((newSegments) => {
@@ -120,11 +138,15 @@ export function useTranscription(modelUrl: string) {
           return;
         }
         setErrorMessage(error instanceof Error ? error.message : "Transcription failed");
-      });
+      })
+      .finally(() => setPendingJobCount((c) => c - 1));
   }, []);
 
   const pushChunk = useCallback(
     (chunk: PCMChunk) => {
+      if (windowSampleCount.current[chunk.channel] === 0) {
+        windowStartTimestamp.current[chunk.channel] = chunk.timestamp;
+      }
       windowBuffers.current[chunk.channel].push(chunk.samples);
       windowSampleCount.current[chunk.channel] += chunk.samples.length;
       if (windowSampleCount.current[chunk.channel] >= WINDOW_SAMPLES) {
@@ -142,10 +164,20 @@ export function useTranscription(modelUrl: string) {
   const reset = useCallback(() => {
     windowBuffers.current = { mic: [], participants: [] };
     windowSampleCount.current = { mic: 0, participants: 0 };
-    windowStart.current = { mic: 0, participants: 0 };
+    windowStartTimestamp.current = { mic: null, participants: null };
     setSegments([]);
     setErrorMessage(null);
+    setPendingJobCount(0);
   }, []);
 
-  return { modelStatus, downloadProgress, segments, errorMessage, pushChunk, flushAll, reset };
+  return {
+    modelStatus,
+    downloadProgress,
+    segments,
+    errorMessage,
+    pendingJobCount,
+    pushChunk,
+    flushAll,
+    reset,
+  };
 }

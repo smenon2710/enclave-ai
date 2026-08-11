@@ -128,6 +128,12 @@ export default function Home() {
   const { state, startMeeting, stopMeeting } = useMeetingRecorder(handlePCMChunk);
   const isRecording = state.status === "recording";
   const isBusy = state.status === "requesting-mic" || state.status === "requesting-participants";
+  // WhisperEngine serializes transcribe() calls through one queue — if live
+  // transcription falls behind real-time during a long/busy call, a backlog
+  // can still be draining after Stop is clicked (flushAll just adds two more
+  // jobs to the end of it). Summary/Ask should wait for it, not run against
+  // a transcript that's still missing its last stretch.
+  const isFinalizingTranscript = transcription.pendingJobCount > 0;
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const currentMeetingRef = useRef<{ id: string; startedAt: number } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -180,8 +186,12 @@ export default function Home() {
     webSpeech.reset();
     summary.reset();
     chat.reset();
-    await startMeeting(micDeviceId || undefined);
-    if (micEngine === "cloud") webSpeech.start();
+    const meetingEpochMs = await startMeeting(micDeviceId || undefined);
+    // null means mic capture itself failed (see useMeetingRecorder) — don't
+    // start cloud speech recognition against a meeting that never began, and
+    // don't pass along a missing epoch that would make its timestamps drift
+    // from whisper's.
+    if (meetingEpochMs !== null && micEngine === "cloud") webSpeech.start(meetingEpochMs);
     refreshDevices(); // labels are blank pre-permission; populate now that it's granted
   };
 
@@ -377,13 +387,25 @@ export default function Home() {
           </div>
         </div>
 
+        {isFinalizingTranscript && (
+          <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
+            Finalizing transcript — still processing the last bit of local audio. Summary and Ask
+            are disabled until this settles so they don&apos;t run against a partial transcript.
+          </div>
+        )}
+
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Summary</h2>
             <button
               type="button"
               onClick={handleGenerateSummary}
-              disabled={!openRouter.hasApiKey || allSegments.length === 0 || summary.status === "loading"}
+              disabled={
+                !openRouter.hasApiKey ||
+                allSegments.length === 0 ||
+                summary.status === "loading" ||
+                isFinalizingTranscript
+              }
               className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
             >
               {summary.status === "loading" ? "Generating…" : "Generate summary"}
@@ -421,7 +443,7 @@ export default function Home() {
               messages={chat.messages}
               status={chat.status}
               errorMessage={chat.errorMessage}
-              disabled={allSegments.length === 0}
+              disabled={allSegments.length === 0 || isFinalizingTranscript}
               onAsk={handleAsk}
             />
           </div>

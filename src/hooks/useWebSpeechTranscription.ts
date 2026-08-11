@@ -85,7 +85,16 @@ export function useWebSpeechTranscription() {
     }, STARTUP_WATCHDOG_MS);
   }, [clearWatchdog]);
 
-  const start = useCallback(() => {
+  /**
+   * `meetingEpochMs` should be the same wall-clock origin passed to whisper
+   * transcription (see useMeetingRecorder's startMeeting return value) —
+   * without it, segments here would be timestamped from whenever this
+   * function happens to be called, which can be well after the meeting
+   * actually started (mic + participants permission prompts run first),
+   * throwing off merge order against the Participants channel. Falls back
+   * to "now" only if no shared origin is available.
+   */
+  const start = useCallback((meetingEpochMs?: number) => {
     const Ctor = getSpeechRecognitionConstructor();
     if (!Ctor) {
       setStatus("error");
@@ -94,7 +103,7 @@ export function useWebSpeechTranscription() {
     }
 
     shouldRunRef.current = true;
-    startTimeRef.current = Date.now();
+    startTimeRef.current = meetingEpochMs ?? Date.now();
 
     const recognition = new Ctor();
     recognition.continuous = true;

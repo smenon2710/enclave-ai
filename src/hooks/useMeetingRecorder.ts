@@ -100,8 +100,17 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     setState((prev) => ({ ...prev, status: "stopped", participantsActive: false }));
   }, []);
 
-  const startMeeting = useCallback(async (micDeviceId?: string) => {
+  const startMeeting = useCallback(async (micDeviceId?: string): Promise<number | null> => {
     chunksRef.current = { mic: [], participants: [] };
+    // Single wall-clock origin for the whole meeting, captured before any
+    // async gap (permission prompts etc). The AudioContext created inside
+    // capture.prime() right below effectively starts its own currentTime
+    // clock at this same instant, so whisper-transcribed segments (which use
+    // that clock — see useTranscription.ts) and Web Speech segments (which
+    // need this epoch passed in explicitly — see page.tsx) end up on a
+    // single shared timeline instead of each channel/engine starting its
+    // own clock at 0 whenever it happens to actually begin capturing.
+    const meetingEpochMs = Date.now();
     setState((prev) => ({
       ...prev,
       status: "requesting-mic",
@@ -132,7 +141,7 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
             ? `Microphone access failed: ${error.message}`
             : "Microphone access failed.",
       }));
-      return;
+      return null;
     }
 
     setState((prev) => ({ ...prev, status: "requesting-participants" }));
@@ -156,6 +165,7 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     }, 1000);
 
     setState((prev) => ({ ...prev, status: "recording" }));
+    return meetingEpochMs;
   }, [handleChunk]);
 
   useEffect(() => {
