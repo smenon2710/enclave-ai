@@ -82,6 +82,11 @@ EMSCRIPTEN_BINDINGS(whisper) {
             seg.set("start", whisper_full_get_segment_t0(ctx, i) * 0.01);
             seg.set("end",   whisper_full_get_segment_t1(ctx, i) * 0.01);
             seg.set("text",  std::string(whisper_full_get_segment_text(ctx, i)));
+            // Whisper's own confidence that this segment contains no speech
+            // at all — exposed so the JS side can filter out silence-driven
+            // hallucinations (e.g. "[BLANK_AUDIO]") more robustly than
+            // pattern-matching the text alone catches.
+            seg.set("noSpeechProb", whisper_full_get_segment_no_speech_prob(ctx, i));
             segments.call<void>("push", seg);
         }
 

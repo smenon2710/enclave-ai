@@ -36,8 +36,11 @@ What the patches do, and why:
   dedicated Worker already off the main thread, so that dispatch thread is
   unnecessary complexity — and empirically, it's also where the original
   hang (see below) turned out to live. This replacement runs `whisper_full`
-  synchronously and returns structured `{start, end, text}` segments via
-  `whisper_full_get_segment_*`, independent of whether pthreads are on.
+  synchronously and returns structured `{start, end, text, noSpeechProb}`
+  segments via `whisper_full_get_segment_*` (`noSpeechProb` added after
+  real-user testing surfaced `[BLANK_AUDIO]` hallucinations on silent audio
+  polluting the transcript — `src/lib/stt/whisperEngine.ts` filters on it
+  client-side), independent of whether pthreads are on.
 - **`whisper.wasm-CMakeLists.txt`** currently ships with
   `-s USE_PTHREADS=1` / `PTHREAD_POOL_SIZE_STRICT=0` in the link flags
   (multi-threaded), plus `FS` added to `EXPORTED_RUNTIME_METHODS` (needed

@@ -5,6 +5,29 @@ interface RawSegment {
   start: number;
   end: number;
   text: string;
+  noSpeechProb: number;
+}
+
+// Matches whisper.cpp's own internal default (no_speech_thold) — segments
+// this "confident" that there's no speech are near-certainly a hallucinated
+// bracket tag ("[BLANK_AUDIO]") or garbage, not real content worth keeping.
+const NO_SPEECH_PROB_THRESHOLD = 0.6;
+
+// Defense in depth alongside the probability check: whisper's non-speech
+// annotations ("[BLANK_AUDIO]", "[MUSIC]", "(silence)", etc.) are
+// consistently a single bracket/paren-wrapped tag with nothing else in the
+// segment — real transcribed speech essentially never looks like that.
+// Catches cases the probability alone misses (e.g. it's confident there's
+// *some* non-speech audio like music, which isn't the same thing as "no
+// speech" in whisper's own scoring).
+const NON_SPEECH_TAG_RE = /^[[(][^\n]*[\])]$/;
+
+function isRealSpeech(seg: RawSegment): boolean {
+  const text = seg.text.trim();
+  if (text.length === 0) return false;
+  if (seg.noSpeechProb > NO_SPEECH_PROB_THRESHOLD) return false;
+  if (NON_SPEECH_TAG_RE.test(text)) return false;
+  return true;
 }
 
 type WorkerOutMessage =
@@ -83,12 +106,14 @@ export class WhisperEngine {
       if (!job) return;
       this.pendingJobs.delete(msg.jobId);
       job.resolve(
-        msg.segments.map((seg) => ({
-          channel: msg.channel,
-          start: job.offsetSeconds + seg.start,
-          end: job.offsetSeconds + seg.end,
-          text: seg.text,
-        }))
+        msg.segments
+          .filter(isRealSpeech)
+          .map((seg) => ({
+            channel: msg.channel,
+            start: job.offsetSeconds + seg.start,
+            end: job.offsetSeconds + seg.end,
+            text: seg.text.trim(),
+          }))
       );
     } else if (msg.type === "error" && msg.jobId) {
       const job = this.pendingJobs.get(msg.jobId);
