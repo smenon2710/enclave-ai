@@ -100,7 +100,7 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     setState((prev) => ({ ...prev, status: "stopped", participantsActive: false }));
   }, []);
 
-  const startMeeting = useCallback(async () => {
+  const startMeeting = useCallback(async (micDeviceId?: string) => {
     chunksRef.current = { mic: [], participants: [] };
     setState((prev) => ({
       ...prev,
@@ -116,7 +116,12 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     captureRef.current = capture;
 
     try {
-      const micStream = await getMicStream();
+      // Create/resume the AudioContext before the getUserMedia await below —
+      // doing it after would risk losing the click's user-gesture
+      // association, which can leave the context silently suspended (see
+      // MeetingAudioCapture.prime).
+      await capture.prime();
+      const micStream = await getMicStream(micDeviceId);
       await capture.addChannel("mic", micStream, handleChunk);
     } catch (error) {
       setState((prev) => ({

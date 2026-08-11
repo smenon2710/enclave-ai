@@ -6,15 +6,17 @@ import { loadModel, type ModelFetchProgress } from "@/lib/stt/modelStore";
 import type { TranscriptSegment } from "@/lib/stt/types";
 import type { AudioChannelLabel, PCMChunk } from "@/lib/audio/types";
 
-const MODEL_URL =
-  process.env.NEXT_PUBLIC_WHISPER_MODEL_URL ??
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
 const SAMPLE_RATE = 16000;
-const WINDOW_SAMPLES = SAMPLE_RATE * 5; // ~5s rolling window per channel
+// Window size trades latency against transcription quality: a shorter
+// window means less audio buffered (and thus less wait) before whisper.cpp
+// even starts on a chunk, but also less context per inference call and more
+// frequent chunk-boundary cuts (see plan.md §4.9). 3s balances "captured
+// speech shows up reasonably fast" against not fragmenting too aggressively.
+const WINDOW_SAMPLES = SAMPLE_RATE * 3;
 
 export type ModelStatus = "idle" | "downloading" | "initializing" | "ready" | "error";
 
-export function useTranscription() {
+export function useTranscription(modelUrl: string) {
   const engineRef = useRef<WhisperEngine | null>(null);
   const windowBuffers = useRef<Record<AudioChannelLabel, Float32Array[]>>({
     mic: [],
@@ -39,8 +41,9 @@ export function useTranscription() {
 
     async function init() {
       setModelStatus("downloading");
+      setDownloadProgress(null);
       try {
-        const modelBytes = await loadModel(MODEL_URL, (progress) => {
+        const modelBytes = await loadModel(modelUrl, (progress) => {
           if (!cancelled) setDownloadProgress(progress);
         });
         if (cancelled) return;
@@ -68,7 +71,7 @@ export function useTranscription() {
       engineRef.current?.terminate();
       engineRef.current = null;
     };
-  }, []);
+  }, [modelUrl]);
 
   const flushWindow = useCallback((channel: AudioChannelLabel) => {
     const engine = engineRef.current;

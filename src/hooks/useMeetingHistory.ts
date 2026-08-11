@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { deleteMeeting, importMeetings, listMeetings, saveMeeting } from "@/lib/history/db";
+import {
+  clearAllMeetings,
+  deleteMeeting,
+  importMeetings,
+  listMeetings,
+  saveMeeting,
+} from "@/lib/history/db";
 import type { MeetingRecord } from "@/lib/history/types";
 
 export function useMeetingHistory() {
@@ -47,5 +53,10 @@ export function useMeetingHistory() {
     [refresh]
   );
 
-  return { meetings, save, remove, importAll };
+  const removeAll = useCallback(async () => {
+    await clearAllMeetings();
+    await refresh();
+  }, [refresh]);
+
+  return { meetings, save, remove, importAll, removeAll };
 }

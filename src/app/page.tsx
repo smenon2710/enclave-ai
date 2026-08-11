@@ -5,9 +5,14 @@ import { useMeetingRecorder, type ChannelStats } from "@/hooks/useMeetingRecorde
 import { useTranscription } from "@/hooks/useTranscription";
 import { useOpenRouterSettings } from "@/hooks/useOpenRouterSettings";
 import { useSummary } from "@/hooks/useSummary";
+import { useMeetingChat } from "@/hooks/useMeetingChat";
 import { useMeetingHistory } from "@/hooks/useMeetingHistory";
+import { useMicrophoneDevice } from "@/hooks/useMicrophoneDevice";
+import { useSttModelSettings } from "@/hooks/useSttModelSettings";
+import { getWhisperModelUrl } from "@/lib/stt/models";
 import { SettingsModal } from "@/components/SettingsModal";
 import { HistoryModal } from "@/components/HistoryModal";
+import { MeetingChat } from "@/components/MeetingChat";
 
 function formatElapsed(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
@@ -80,11 +85,25 @@ function ModelStatusBanner({
 }
 
 export default function Home() {
-  const transcription = useTranscription();
+  const sttModel = useSttModelSettings();
+  // The env override exists for local dev convenience (point at a local
+  // model file instead of re-downloading from Hugging Face every reload)
+  // and takes priority over the Settings picker.
+  const modelUrl = process.env.NEXT_PUBLIC_WHISPER_MODEL_URL ?? getWhisperModelUrl(sttModel.modelId);
+  const transcription = useTranscription(modelUrl);
   const { state, startMeeting, stopMeeting } = useMeetingRecorder(transcription.pushChunk);
   const openRouter = useOpenRouterSettings();
   const summary = useSummary();
-  const { meetings, save: saveMeetingToHistory, remove: removeMeetingFromHistory, importAll: importMeetingHistory } = useMeetingHistory();
+  const chat = useMeetingChat();
+  const {
+    meetings,
+    save: saveMeetingToHistory,
+    remove: removeMeetingFromHistory,
+    removeAll: removeAllMeetingHistory,
+    importAll: importMeetingHistory,
+  } = useMeetingHistory();
+  const { deviceId: micDeviceId, devices: micDevices, setDeviceId: setMicDeviceId, refreshDevices } =
+    useMicrophoneDevice();
   const isRecording = state.status === "recording";
   const isBusy = state.status === "requesting-mic" || state.status === "requesting-participants";
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
@@ -127,7 +146,9 @@ export default function Home() {
     currentMeetingRef.current = { id: crypto.randomUUID(), startedAt: Date.now() };
     transcription.reset();
     summary.reset();
-    await startMeeting();
+    chat.reset();
+    await startMeeting(micDeviceId || undefined);
+    refreshDevices(); // labels are blank pre-permission; populate now that it's granted
   };
 
   const handleStop = async () => {
@@ -137,6 +158,10 @@ export default function Home() {
 
   const handleGenerateSummary = () => {
     void summary.generate(transcription.segments, openRouter.apiKey, openRouter.model);
+  };
+
+  const handleAsk = (question: string) => {
+    void chat.ask(transcription.segments, openRouter.apiKey, openRouter.model, question);
   };
 
   return (
@@ -187,6 +212,24 @@ export default function Home() {
           <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
             {state.errorMessage}
           </div>
+        )}
+
+        {micDevices.length > 1 && !isRecording && (
+          <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
+            Microphone
+            <select
+              value={micDeviceId}
+              onChange={(e) => setMicDeviceId(e.target.value)}
+              className="min-w-0 flex-1 rounded-md border border-black/10 bg-transparent px-2 py-1 text-sm dark:border-white/10"
+            >
+              <option value="">Browser default</option>
+              {micDevices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </label>
         )}
 
         <div className="flex flex-wrap items-center gap-3">
@@ -305,6 +348,20 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        <div className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Ask</h2>
+          <div className="rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
+            <MeetingChat
+              hasApiKey={openRouter.hasApiKey}
+              messages={chat.messages}
+              status={chat.status}
+              errorMessage={chat.errorMessage}
+              disabled={transcription.segments.length === 0}
+              onAsk={handleAsk}
+            />
+          </div>
+        </div>
       </main>
 
       {isSettingsOpen && (
@@ -314,6 +371,8 @@ export default function Home() {
           model={openRouter.model}
           onApiKeyChange={openRouter.setApiKey}
           onModelChange={openRouter.setModel}
+          sttModelId={sttModel.modelId}
+          onSttModelChange={sttModel.setModelId}
         />
       )}
 
@@ -322,6 +381,7 @@ export default function Home() {
           onClose={() => setIsHistoryOpen(false)}
           meetings={meetings}
           onDelete={(id) => void removeMeetingFromHistory(id)}
+          onDeleteAll={() => void removeAllMeetingHistory()}
           onImport={importMeetingHistory}
         />
       )}

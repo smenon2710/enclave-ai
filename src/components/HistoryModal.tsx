@@ -9,6 +9,7 @@ interface HistoryModalProps {
   onClose: () => void;
   meetings: MeetingRecord[];
   onDelete: (id: string) => void;
+  onDeleteAll: () => void;
   onImport: (records: MeetingRecord[]) => Promise<void>;
 }
 
@@ -18,7 +19,13 @@ function formatDuration(totalSeconds: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-export function HistoryModal({ onClose, meetings, onDelete, onImport }: HistoryModalProps) {
+export function HistoryModal({
+  onClose,
+  meetings,
+  onDelete,
+  onDeleteAll,
+  onImport,
+}: HistoryModalProps) {
   const [query, setQuery] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -43,6 +50,16 @@ export function HistoryModal({ onClose, meetings, onDelete, onImport }: HistoryM
       JSON.stringify(payload, null, 2),
       "application/json"
     );
+  };
+
+  const handleDeleteAll = () => {
+    if (
+      confirm(
+        `Delete all ${meetings.length} meeting${meetings.length === 1 ? "" : "s"}? This can't be undone — export a backup first if you want to keep them.`
+      )
+    ) {
+      onDeleteAll();
+    }
   };
 
   const handleImportFile = async (file: File) => {
@@ -106,6 +123,14 @@ export function HistoryModal({ onClose, meetings, onDelete, onImport }: HistoryM
               className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/10"
             >
               Import
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteAll}
+              disabled={meetings.length === 0}
+              className="rounded-full border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 disabled:opacity-40 dark:border-red-900 dark:text-red-400"
+            >
+              Delete all
             </button>
           </div>
           <input

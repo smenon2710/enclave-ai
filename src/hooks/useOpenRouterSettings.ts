@@ -4,7 +4,10 @@ import { useCallback, useSyncExternalStore } from "react";
 
 const API_KEY_STORAGE_KEY = "enclave-ai:openrouter-api-key";
 const MODEL_STORAGE_KEY = "enclave-ai:openrouter-model";
-const DEFAULT_MODEL = "openai/gpt-4o-mini";
+// OpenRouter's own free-tier auto-router — always $0, self-maintaining
+// (picks from whatever free models are currently available rather than us
+// hardcoding a specific model ID that could get deprecated/renamed).
+const DEFAULT_MODEL = "openrouter/free";
 
 type Listener = () => void;
 const listeners = new Set<Listener>();

@@ -1,12 +1,40 @@
-export async function getMicStream(): Promise<MediaStream> {
+/**
+ * `deviceId` pins a specific input (over the browser/OS default) — matters
+ * because the default device is a common silent-failure source: audio
+ * capture succeeds and produces real samples, just from the wrong mic
+ * (muted built-in mic while a Bluetooth headset is connected, an unplugged
+ * external mic still set as default, etc).
+ */
+export async function getMicStream(deviceId?: string): Promise<MediaStream> {
   return navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     },
     video: false,
   });
+}
+
+export interface MicrophoneOption {
+  deviceId: string;
+  label: string;
+}
+
+/**
+ * Device labels are blank until mic permission has been granted at least
+ * once in this browser — before that, callers just get generic "Microphone
+ * 1"-style fallback labels below.
+ */
+export async function listMicrophones(): Promise<MicrophoneOption[]> {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+    return [];
+  }
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter((d) => d.kind === "audioinput")
+    .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${i + 1}` }));
 }
 
 export function isDisplayAudioCaptureSupported(): boolean {

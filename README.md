@@ -43,6 +43,14 @@ the History modal's toolbar.
 
 All five roadmap phases are now built and verified end-to-end.
 
+**Post-launch fixes & additions (from real-device testing feedback):**
+- **Delete history**: "Delete all" in the History panel, alongside the existing per-meeting delete.
+- **Mic capture reliability**: fixed a real bug where the `AudioContext` was created *after* the mic-permission prompt, which can silently lose the browser's required user-gesture association and leave audio capture dead with zero error shown. Now primed before the permission prompt, with a visible error if it still fails. Also added a microphone device picker (Settings-adjacent, shows once multiple inputs are detected) for when the OS/browser default input isn't the one you're actually speaking into.
+- **Transcription accuracy**: added a model-quality picker (`tiny.en` fast/default vs `base.en` more accurate) — the default `tiny.en` trades accuracy for speed and download size, which is fine on clean audio but degrades on real mic conditions.
+- **Perceived latency**: audio capture itself has zero latency (it's 100% client-side; Vercel hosting only serves the initial static files). The delay users notice is the transcription pipeline's fixed buffering window — reduced from 5s to 3s to get text on screen faster, at a small cost to per-chunk context/accuracy.
+- **Free-tier OpenRouter models**: default model changed to `openrouter/free` (OpenRouter's self-maintaining free-tier router), and the Settings model picker has a "Free only" filter (checked by default) so testing never touches a paid model by accident.
+- **Ask (Otter-style Q&A)**: a chat panel below Summary — ask questions about the current/just-finished meeting ("what did we decide?", "what are my action items?") and get answers grounded only in that meeting's transcript, with multi-turn follow-up support. Currently scoped to the active meeting only; asking questions about a past meeting from History isn't wired up yet.
+
 ## Getting Started
 
 ```bash
@@ -61,7 +69,9 @@ Cross-origin isolation headers (`COOP`/`COEP`) are configured in
 
 To point at a local model file instead of fetching from Hugging Face every
 reload during development, set `NEXT_PUBLIC_WHISPER_MODEL_URL` in
-`.env.local`.
+`.env.local`. Note this overrides the in-app model picker entirely (it takes
+priority over whatever's selected in Settings) — don't leave it set if
+you're testing the tiny.en/base.en switcher.
 
 To test offline/PWA behavior, use a production build (`npm run build && npm
 run start`) — `npm run dev`'s Turbopack HMR chunk names change between

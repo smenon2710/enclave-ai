@@ -25,13 +25,44 @@ export class MeetingAudioCapture {
       this.moduleLoaded = null;
     }
     if (this.context.state === "suspended") {
+      // Browsers only auto-resume within a user gesture; if this call landed
+      // after an await (e.g. a permission prompt) the gesture can be lost
+      // and resume() silently no-ops, leaving the context suspended forever
+      // with zero error — the worklet just never processes audio. One retry
+      // covers the common case; if it's still suspended, surface it instead
+      // of failing silently. (state re-read fresh each time — TS narrows the
+      // literal type per-check, but the underlying value can change under us.)
+      // TS narrows `this.context.state` to the "suspended" literal from the
+      // outer check and doesn't invalidate that across the opaque resume()
+      // calls, so each re-read needs an explicit widen back to the full
+      // union — the runtime value genuinely can be any of the four states.
       await this.context.resume();
+      let state = this.context.state as AudioContextState;
+      if (state === "suspended") {
+        await this.context.resume();
+        state = this.context.state as AudioContextState;
+      }
+      if (state !== "running") {
+        throw new Error(
+          "Browser blocked audio playback (AudioContext stayed suspended). Try clicking Start meeting again."
+        );
+      }
     }
     if (!this.moduleLoaded) {
       this.moduleLoaded = this.context.audioWorklet.addModule(WORKLET_URL);
     }
     await this.moduleLoaded;
     return this.context;
+  }
+
+  /**
+   * Creates (or resumes) the AudioContext as early as possible in the
+   * Start-meeting flow, before any `await` breaks the click's user-gesture
+   * association — call this synchronously at the top of the click handler,
+   * ahead of getUserMedia's permission-prompt await.
+   */
+  async prime(): Promise<void> {
+    await this.ensureContext();
   }
 
   async addChannel(

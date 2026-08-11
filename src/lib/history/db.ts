@@ -42,6 +42,11 @@ export async function deleteMeeting(id: string): Promise<void> {
   await db.delete("meetings", id);
 }
 
+export async function clearAllMeetings(): Promise<void> {
+  const db = await getDb();
+  await db.clear("meetings");
+}
+
 export async function importMeetings(meetings: MeetingRecord[]): Promise<void> {
   const db = await getDb();
   const tx = db.transaction("meetings", "readwrite");
