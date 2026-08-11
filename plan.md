@@ -3,7 +3,9 @@
 ## Overview
 This document outlines the architecture, technology stack, and execution roadmap for a **browser-based, no-install meeting recording and summarization app** — an in-browser alternative to Otter.ai and Fathom.
 
-It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeting audio via standard browser APIs, transcribes it fully client-side (no audio ever leaves the device), stores history locally in the browser, and — only if the user opts in — sends the finished transcript to an LLM of their choice via their own OpenRouter API key for summarization.
+It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeting audio via standard browser APIs, stores history locally in the browser, and — only if the user opts in — sends the finished transcript to an LLM of their choice via their own OpenRouter API key for summarization.
+
+**Transcription is a hybrid, not fully local, as of the real-user latency/accuracy feedback documented in §4.10.** Your own voice (mic) is transcribed via the browser's cloud speech service (Web Speech API — fast, accurate, but that audio leaves the device) when available, falling back to the local whisper.cpp WASM engine otherwise. Participants' audio (tab/system capture) always stays on-device via whisper.cpp, because the Web Speech API has no way to listen to anything but the microphone. See §4.10 for why, and §6 for the updated privacy model.
 
 ---
 
@@ -11,7 +13,7 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
 
 * **$0 Operating Cost (to you):** Static Next.js app on Vercel's free tier. No servers, no database, no per-user compute cost. LLM usage is billed to the *user's own* OpenRouter key, not to you.
 * **No Install, Works Anywhere:** Runs in any modern browser — share a link, no download, no OS-specific build.
-* **Transcription Stays Local:** Speech-to-text runs client-side via WASM (Whisper). Audio and transcript text never touch a server you control.
+* **Transcription Stays Local — for Participants; hybrid for your own voice.** Speech-to-text never touches a server *we* control either way. Participants' audio always runs client-side via WASM Whisper. Your own mic audio runs through the browser's cloud speech service when available (see §4.10) — that audio does leave your device, to the browser vendor's recognition service, not to us.
 * **Bring Your Own LLM:** Users paste their own OpenRouter API key and pick a model. No key = transcription and history still work; only summarization is disabled.
 * **History Lives With the User:** Meeting history is stored in the browser (IndexedDB), not on a server — private by default, but device-local (see §6 for the tradeoff).
 
@@ -24,7 +26,8 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
 | **Framework** | App & Hosting | **Next.js**, deployed on **Vercel** (free tier) |
 | **Audio Capture** | Mic Input (You) | `getUserMedia` → **`AudioWorkletNode`** for raw PCM extraction (dedicated real-time audio thread, not main thread) |
 | **Audio Capture** | Remote/System Audio | `getDisplayMedia({ audio: true })` (tab/screen share) → same `AudioWorkletNode` pipeline |
-| **STT Engine** | Speech-to-Text | **`whisper.cpp` compiled to WASM** (C++/`ggml`, WASM SIMD + pthreads), run synchronously in a dedicated Worker, with a watchdog that falls back to single-threaded on a stuck worker — see §4.7. |
+| **STT Engine** | Participants (always) | **`whisper.cpp` compiled to WASM** (C++/`ggml`, WASM SIMD + pthreads), run synchronously in a dedicated Worker, with a watchdog that falls back to single-threaded on a stuck worker — see §4.7. |
+| **STT Engine** | Mic / "You" (preferred) | **Web Speech API** (`SpeechRecognition`) — cloud recognition via the browser vendor, fast/accurate, requires internet, Chrome/Edge-family only. Falls back to the whisper.cpp engine above when unsupported. See §4.10. |
 | **Diarization** | Speaker Separation | None in v1 — remote audio is a single "Participants" stream (see §4). Future: WASM speaker-embedding model (ONNX-WASM-SIMD or Rust/`wasm-bindgen`), not a JS reimplementation. |
 | **Summarization** | LLM | **OpenRouter API**, user-supplied key, user-selectable model |
 | **Storage** | Meeting History | **IndexedDB** (via `idb` — thin promise wrapper, no query layer; matches the pattern used elsewhere in this codebase's sibling projects), browser-local, no backend |
@@ -41,16 +44,21 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
         │ (Mic → "You")    │              │ (Tab/System → "Participants")│
         └────────┬─────────┘              └──────────────┬────────────┘
                  │                                        │
-                 ▼                                        ▼
-        ┌───────────────────────────────────────────────────────────┐
-        │        AudioWorklet: raw PCM, resampled to 16kHz mono      │
-        └───────────────────────────┬───────────────────────────────┘
-                                    ▼
-        ┌───────────────────────────────────────────────────────────┐
-        │   Worker: whisper.cpp (C++/ggml → WASM, SIMD + threads)    │
-        │        Chunked transcription, both streams, timestamped    │
-        └───────────────────────────┬───────────────────────────────┘
-                                    ▼
+        ┌────────┴────────┐                               │
+        ▼                 ▼                                ▼
+┌───────────────┐  ┌──────────────┐            ┌───────────────────────┐
+│ Web Speech API│  │ AudioWorklet │            │      AudioWorklet      │
+│ (cloud, if    │  │ (PCM, for    │            │  (raw PCM, resampled   │
+│  available)   │  │  level meter │            │      to 16kHz mono)    │
+└───────┬───────┘  │  only)       │            └───────────┬───────────┘
+        │          └──────────────┘                        ▼
+        │                                     ┌───────────────────────────┐
+        │      (falls back to whisper.cpp     │  Worker: whisper.cpp      │
+        │       below when Web Speech is       │  (C++/ggml → WASM,        │
+        │       unsupported)                   │   SIMD + threads)         │
+        │                                     │  Chunked, timestamped      │
+        │                                     └─────────────┬─────────────┘
+        ▼                                                    ▼
                        ┌────────────────────────┐
                        │ Chronological Transcript│
                        │ (single JS clock — both │
@@ -71,7 +79,9 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
                        └────────────────────────┘
 ```
 
-One upside of moving to the browser: both audio streams are captured in the same JS runtime on the same clock, so the timestamp-drift problem the native desktop version would have had (reconciling two separate hardware audio devices) doesn't apply here — merge-by-timestamp is straightforward.
+One upside of moving to the browser: both audio streams are captured in the same JS runtime on the same clock, so the timestamp-drift problem the native desktop version would have had (reconciling two separate hardware audio devices) doesn't apply here — merge-by-timestamp is straightforward. This holds even for the Web Speech path: its segments are timestamped using elapsed-time-since-meeting-start at the moment each final result arrives (Web Speech gives no word-level timing of its own), same clock as everything else.
+
+Note the mic channel's `AudioWorkletNode` still runs even when Web Speech handles transcription — it's kept purely for the live level meter, since Web Speech manages its own internal audio capture with no hook to expose levels.
 
 ---
 
@@ -87,7 +97,8 @@ These are real limitations of the platform, not implementation gaps — worth be
 6. **Multi-threaded `whisper.cpp` WASM needs `SharedArrayBuffer`, which needs cross-origin isolation.** Vercel must serve `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers (`next.config.js`/`vercel.json`) — already wired in Phase 1. Without them, `whisper.cpp` still runs, just single-threaded and slower.
 7. **Multi-threaded (`USE_PTHREADS=1`) build re-enabled, with a watchdog fallback — not fully verified yet.** Originally shipped single-threaded because the pthreads build hung indefinitely in this project's sandboxed dev/build environment (reproduced across two Emscripten versions, in both plain Node and headless Chromium). Re-enabled multi-threading in response to real-user latency complaints, since that hang was never confirmed to happen in a normal, non-sandboxed browser — only in the build sandbox. To make that bet safe: `WhisperEngine.transcribe()` (`src/lib/stt/whisperEngine.ts`) races every call against a 25s timeout; on timeout it terminates the stuck worker (throws `EngineTimeoutError`) and `useTranscription.ts` catches that specifically, drops to `nthreads=1`, and forces a full re-init — degrading to the previously-verified single-threaded path instead of freezing the app forever. This fallback path was itself verified end-to-end in the sandboxed environment (which reliably reproduces the original hang): watchdog fires, worker is killed, engine restarts single-threaded, transcription resumes correctly. **What's still unverified:** whether multi-threading actually improves latency in a real user's browser — that can only be confirmed by using the app for real and checking whether the "restarting single-threaded" message ever appears (if it does, threading failed there too and the fallback caught it; if it doesn't, threading is working).
 8. **The upstream WASM binding was replaced with a custom one.** The stock `emscripten.cpp` (upstream's own whisper.wasm demo) dispatches transcription via a detached `std::thread` purely to make the call non-blocking for a browser main-thread caller, and reports results by parsing `printf`-formatted timestamp lines (`[HH:MM:SS.mmm --> ...]`) off stdout — there's no structured completion callback. Since this binding is only ever called from inside a dedicated Worker (already off the main thread), the outer dispatch thread was unnecessary complexity, and it was also the exact mechanism that hung (see #7). The custom binding (`public/wasm/whisper` build config, source in the scratchpad's `whisper.cpp/examples/whisper.wasm/emscripten.cpp`) runs `whisper_full` synchronously and returns structured `{start, end, text}` segments via the real `whisper_full_get_segment_*` API — more robust than text-scraping regardless of the threading outcome.
-9. **Fixed-size transcription windows cut mid-sentence.** Whisper gets no context across window boundaries, so text that spans a chunk boundary comes out truncated/garbled at the edges (observed in testing: "We are checking that with --" / "We are checking that we're" — same audio, two different truncated results from mic vs. participants chunking slightly out of phase). Window reduced from 5s to 3s after real-user latency feedback, which trims max buffering delay but makes boundary-cutting slightly more frequent, not less. A real fix is VAD-based segmentation or overlapping windows, not naive fixed-size chunking — still an open follow-up.
+9. **Fixed-size transcription windows cut mid-sentence.** Whisper gets no context across window boundaries, so text that spans a chunk boundary comes out truncated/garbled at the edges (observed in testing: "We are checking that with --" / "We are checking that we're" — same audio, two different truncated results from mic vs. participants chunking slightly out of phase). Window reduced from 5s to 3s after real-user latency feedback, which trims max buffering delay but makes boundary-cutting slightly more frequent, not less. A real fix is VAD-based segmentation or overlapping windows, not naive fixed-size chunking — still an open follow-up. This mostly matters for Participants only now, since mic transcription moved to Web Speech (see #10), which streams results incrementally rather than in fixed windows.
+10. **Mic transcription moved to a hybrid: Web Speech API (cloud) preferred, whisper.cpp (local) as fallback.** After re-enabling multi-threaded WASM (#7) and shrinking the transcription window (#9) still didn't meet real-user latency/accuracy expectations, the remaining local-only options were all uncertain (a lighter model, true streaming) while the cloud option was a known, immediate fix — an explicit, informed trade-off, not a default: the user was shown that no local in-browser model can match cloud ASR speed/accuracy, and chose to accept audio leaving the device for the mic channel specifically. **This is not a drop-in swap** — the Web Speech API has no way to accept a custom `MediaStream`; it always captures from the microphone internally, with no hook to redirect it to the `getDisplayMedia` tab-audio stream. That means it can only ever handle the mic ("You") channel — Participants audio has no cloud path available and stays on whisper.cpp regardless. Implementation: `src/hooks/useWebSpeechTranscription.ts` wraps `SpeechRecognition`, auto-restarting on Chrome's periodic `onend` (continuous mode isn't truly infinite), merging its segments with whisper's Participants segments by timestamp at the `page.tsx` level. `useMicEngine()` (`useSyncExternalStore`) picks "cloud" when `SpeechRecognition`/`webkitSpeechRecognition` exists, else "local" (whisper.cpp handles mic too, old behavior, in Safari/Firefox). **Verification gap, same shape as #7:** in this project's headless/sandboxed build environment, `SpeechRecognition.start()` doesn't throw but never fires *any* event — not even `onstart` — over 20s, a known limitation of headless Chrome (no working path to the cloud recognition service without a full browser session), not a code bug. Confirmed the Participants/whisper path is unaffected (still produces correct real-speech transcripts) and added a 10s startup watchdog (`STARTUP_WATCHDOG_MS`) so if this same silent-non-response ever happens in a real user's browser (e.g. no connectivity), they get a visible error instead of "Listening…" forever with no feedback — verified the watchdog itself fires correctly in the sandboxed environment. **What's still unverified:** whether Web Speech actually produces fast, accurate results in a real browser session — that can only be confirmed by using the app for real.
 
 ---
 
@@ -98,7 +109,7 @@ These are real limitations of the platform, not implementation gaps — worth be
 - Implement `getUserMedia` (mic) and `getDisplayMedia` (tab/system audio) capture, piped through an `AudioWorkletNode` for raw PCM extraction and resampling, with capability detection and mic-only fallback.
 - **Milestone:** Record a test meeting in Chrome with both streams captured as raw 16kHz PCM in-memory. ✓ verified in-browser.
 
-### Phase 2: Client-Side Transcription (Weeks 2–3) — done (single-threaded; see §4.7)
+### Phase 2: Client-Side Transcription (Weeks 2–3) — done; mic path now hybrid (see §4.10)
 - Compile `whisper.cpp` to WASM via Emscripten (custom synchronous binding, see §4.8), load `ggml-tiny.en.bin`, run in a dedicated Worker (`public/workers/whisper-worker.js`, WASM at `public/wasm/whisper/libmain.js`).
 - Model fetched from Hugging Face at runtime and cached in IndexedDB (`src/lib/stt/modelStore.ts`) — one-time download, not bundled in the repo.
 - Fixed 3s rolling windows per channel (`src/hooks/useTranscription.ts`, reduced from 5s after real-user latency feedback), chunked/near-real-time rather than true streaming — see §4.9 for the chunk-boundary quality tradeoff.
@@ -132,6 +143,7 @@ These are real limitations of the platform, not implementation gaps — worth be
 * Transcripts, summaries, and metadata live in IndexedDB, scoped to the browser/device. No account, no login, no server-side database.
 * The OpenRouter API key lives in `localStorage`, sent only to OpenRouter directly from the browser — never proxied through a server you operate.
 * Tradeoff of local-only history (chosen over cloud sync): no cross-device access, and browser data clears (private browsing, "clear site data", browser reinstall) wipe history. Mitigate with a prominent, easy "Export All" action rather than silently accepting the data-loss risk.
+* **Updated per §4.10: mic audio is no longer guaranteed to stay on-device.** When Web Speech API is available (Chrome/Edge, the common case), your own voice is streamed to the browser vendor's cloud recognition service (Google, in Chrome) to be transcribed — not to a server this app operates, but off-device nonetheless. Participants' audio is unaffected and always stays local via whisper.cpp, since Web Speech has no way to capture it. The in-app tagline and per-channel labels ("— cloud" / "— local") reflect this live, so it's never silently misrepresented as fully local when it isn't.
 
 ---
 
@@ -149,3 +161,4 @@ This is a personal-use tool: no participant-facing consent UI is in scope (§5, 
 4. **Persistence Test:** Record a meeting, reload the page and restart the browser, confirm history is intact in IndexedDB.
 5. **Export/Backup Test:** Confirm "Export All" produces a complete, re-importable backup of meeting history.
 6. **Storage Quota Test:** Simulate near-quota IndexedDB usage and confirm the app warns rather than silently failing to save.
+7. **Web Speech Real-Browser Test (unverified — needs a real, non-sandboxed browser, see §4.10):** Record a meeting in Chrome with actual speech (not synthetic/fake audio) and confirm (a) mic transcript appears noticeably faster/more accurately than the whisper.cpp path, (b) the "restarting single-threaded" and "Speech recognition isn't responding" fallback messages never appear during normal use, (c) Participants transcription is unaffected.

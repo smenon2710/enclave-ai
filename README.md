@@ -1,7 +1,15 @@
 # Enclave AI
 
-Browser-based, privacy-first meeting assistant. No install, no server-side
-audio or LLM processing — see `plan.md` for the full architecture.
+Browser-based meeting assistant. No install, no server-side audio or LLM
+processing — see `plan.md` for the full architecture.
+
+**Transcription is hybrid, not fully local** (see plan.md §4.10): your own
+voice goes through the browser's cloud speech service when available (fast,
+accurate, but that audio leaves the device — Web Speech API, e.g. Google's
+recognition backend in Chrome), falling back to on-device whisper.cpp WASM
+otherwise. Participants' audio always stays on-device via whisper.cpp — Web
+Speech has no way to capture anything but the microphone. The in-app UI
+labels each channel "— cloud" / "— local" live so this is never hidden.
 
 ## Status
 
@@ -52,8 +60,9 @@ All five roadmap phases are now built and verified end-to-end.
 - **Mic capture reliability**: fixed a real bug where the `AudioContext` was created *after* the mic-permission prompt, which can silently lose the browser's required user-gesture association and leave audio capture dead with zero error shown. Now primed before the permission prompt, with a visible error if it still fails. Also added a microphone device picker (Settings-adjacent, shows once multiple inputs are detected) for when the OS/browser default input isn't the one you're actually speaking into.
 - **Transcription accuracy**: added a model-quality picker (`tiny.en` fast/default vs `base.en` more accurate) — the default `tiny.en` trades accuracy for speed and download size, which is fine on clean audio but degrades on real mic conditions.
 - **Latency**: audio capture itself has zero latency (it's 100% client-side; Vercel hosting only serves the initial static files) — the delay is the transcription pipeline. Two changes: reduced the fixed buffering window from 5s to 3s (small cost to per-chunk context/accuracy), and re-enabled multi-threaded WASM (previously disabled because it hung in this project's sandboxed build/test environment specifically — never confirmed broken in a real browser) with an automatic watchdog fallback to single-threaded if a worker gets stuck, so trying threading again can't leave the app frozen. See `wasm-build/README.md` for the full story.
-- **Free-tier OpenRouter models**: default model changed to `openrouter/free` (OpenRouter's self-maintaining free-tier router), and the Settings model picker has a "Free only" filter (checked by default) so testing never touches a paid model by accident.
+- **Free-tier OpenRouter models**: default model changed to `openrouter/free` (OpenRouter's self-maintaining free-tier router), and the Settings model picker has a "Free only" filter (checked by default) so testing never touches a paid model by accident. Also added typo protection: the model field now warns if what you typed doesn't match any known OpenRouter model ID, plus a one-click "Reset to default" — a real bug (a mistyped `operouter/free`, saved silently since the field accepts free text) prompted this.
 - **Ask (Otter-style Q&A)**: a chat panel below Summary — ask questions about the current/just-finished meeting ("what did we decide?", "what are my action items?") and get answers grounded only in that meeting's transcript, with multi-turn follow-up support. Currently scoped to the active meeting only; asking questions about a past meeting from History isn't wired up yet.
+- **Mic transcription moved to a hybrid (Web Speech API + whisper.cpp fallback)** — see plan.md §4.10 for the full story. After multi-threading and a smaller window still didn't meet real-user latency/accuracy expectations, and after being shown that no local in-browser model can match cloud ASR speed, the user made an explicit, informed call to accept mic audio leaving the device for speed. Web Speech can only ever handle the mic channel (no way to point it at captured tab/system audio), so Participants stays on whisper.cpp regardless — this makes the app's transcription pipeline permanently hybrid, not a temporary state. A 10s startup watchdog surfaces a clear error if Web Speech silently never responds (observed in this project's sandboxed test environment — a known headless-Chrome limitation, not a code bug) instead of leaving "Listening…" showing forever. **Unverified**: whether Web Speech actually delivers on speed/accuracy in a real browser session — needs real-world use to confirm.
 
 ## Getting Started
 

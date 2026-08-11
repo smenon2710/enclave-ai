@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMeetingRecorder, type ChannelStats } from "@/hooks/useMeetingRecorder";
 import { useTranscription } from "@/hooks/useTranscription";
+import { useWebSpeechTranscription, useMicEngine } from "@/hooks/useWebSpeechTranscription";
 import { useOpenRouterSettings } from "@/hooks/useOpenRouterSettings";
 import { useSummary } from "@/hooks/useSummary";
 import { useMeetingChat } from "@/hooks/useMeetingChat";
@@ -10,6 +11,7 @@ import { useMeetingHistory } from "@/hooks/useMeetingHistory";
 import { useMicrophoneDevice } from "@/hooks/useMicrophoneDevice";
 import { useSttModelSettings } from "@/hooks/useSttModelSettings";
 import { getWhisperModelUrl } from "@/lib/stt/models";
+import type { PCMChunk } from "@/lib/audio/types";
 import { SettingsModal } from "@/components/SettingsModal";
 import { HistoryModal } from "@/components/HistoryModal";
 import { MeetingChat } from "@/components/MeetingChat";
@@ -63,7 +65,7 @@ function ModelStatusBanner({
   if (status === "error") {
     return (
       <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-        Transcription model failed to load{errorMessage ? `: ${errorMessage}` : "."}
+        Local (Participants) transcription model failed to load{errorMessage ? `: ${errorMessage}` : "."}
       </div>
     );
   }
@@ -76,10 +78,10 @@ function ModelStatusBanner({
   return (
     <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
       {status === "downloading"
-        ? `Downloading transcription model${percent !== null ? ` (${percent}%)` : "…"}`
+        ? `Downloading local transcription model (for Participants)${percent !== null ? ` (${percent}%)` : "…"}`
         : status === "initializing"
           ? "Initializing whisper.cpp (WASM)…"
-          : "Loading transcription model…"}
+          : "Loading local transcription model…"}
     </div>
   );
 }
@@ -91,7 +93,7 @@ export default function Home() {
   // and takes priority over the Settings picker.
   const modelUrl = process.env.NEXT_PUBLIC_WHISPER_MODEL_URL ?? getWhisperModelUrl(sttModel.modelId);
   const transcription = useTranscription(modelUrl);
-  const { state, startMeeting, stopMeeting } = useMeetingRecorder(transcription.pushChunk);
+  const webSpeech = useWebSpeechTranscription();
   const openRouter = useOpenRouterSettings();
   const summary = useSummary();
   const chat = useMeetingChat();
@@ -104,6 +106,26 @@ export default function Home() {
   } = useMeetingHistory();
   const { deviceId: micDeviceId, devices: micDevices, setDeviceId: setMicDeviceId, refreshDevices } =
     useMicrophoneDevice();
+
+  // "cloud" (Web Speech API — fast, but your voice is sent to the browser
+  // vendor's recognition service) when available, else "local" (whisper.cpp,
+  // same engine as Participants).
+  const micEngine = useMicEngine();
+
+  const handlePCMChunk = useCallback(
+    (chunk: PCMChunk) => {
+      // Mic audio only goes to whisper when Web Speech isn't available —
+      // otherwise Web Speech handles mic transcription and whisper only
+      // processes Participants (which Web Speech can't capture at all, see
+      // useWebSpeechTranscription.ts).
+      if (chunk.channel === "participants" || micEngine === "local") {
+        transcription.pushChunk(chunk);
+      }
+    },
+    [transcription, micEngine]
+  );
+
+  const { state, startMeeting, stopMeeting } = useMeetingRecorder(handlePCMChunk);
   const isRecording = state.status === "recording";
   const isBusy = state.status === "requesting-mic" || state.status === "requesting-participants";
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
@@ -111,9 +133,19 @@ export default function Home() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
+  // Merges the two independent transcription sources into one chronological
+  // transcript for display, History, Summary, and Ask — mic segments come
+  // from whichever of Web Speech/whisper is actually handling that channel
+  // this session (see micEngine above); Participants always comes from
+  // whisper, since Web Speech has no way to listen to that stream at all.
+  const allSegments = useMemo(
+    () => [...transcription.segments, ...webSpeech.segments].sort((a, b) => a.start - b.start),
+    [transcription.segments, webSpeech.segments]
+  );
+
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "end" });
-  }, [transcription.segments.length]);
+  }, [allSegments.length]);
 
   // Upserts the current meeting into history whenever it changes after
   // stopping — covers late-arriving segments from flushAll's final window
@@ -122,21 +154,21 @@ export default function Home() {
   useEffect(() => {
     if (state.status !== "stopped") return;
     if (!currentMeetingRef.current) return;
-    if (transcription.segments.length === 0) return;
+    if (allSegments.length === 0) return;
     const { id, startedAt } = currentMeetingRef.current;
     void saveMeetingToHistory({
       id,
       title: `Meeting — ${new Date(startedAt).toLocaleString()}`,
       startedAt,
       durationSeconds: state.elapsedSeconds,
-      segments: transcription.segments,
+      segments: allSegments,
       summary: summary.summary,
       summaryModel: summary.summary ? openRouter.model : null,
     });
   }, [
     state.status,
     state.elapsedSeconds,
-    transcription.segments,
+    allSegments,
     summary.summary,
     openRouter.model,
     saveMeetingToHistory,
@@ -145,23 +177,26 @@ export default function Home() {
   const handleStart = async () => {
     currentMeetingRef.current = { id: crypto.randomUUID(), startedAt: Date.now() };
     transcription.reset();
+    webSpeech.reset();
     summary.reset();
     chat.reset();
     await startMeeting(micDeviceId || undefined);
+    if (micEngine === "cloud") webSpeech.start();
     refreshDevices(); // labels are blank pre-permission; populate now that it's granted
   };
 
   const handleStop = async () => {
     await stopMeeting();
     transcription.flushAll();
+    webSpeech.stop();
   };
 
   const handleGenerateSummary = () => {
-    void summary.generate(transcription.segments, openRouter.apiKey, openRouter.model);
+    void summary.generate(allSegments, openRouter.apiKey, openRouter.model);
   };
 
   const handleAsk = (question: string) => {
-    void chat.ask(transcription.segments, openRouter.apiKey, openRouter.model, question);
+    void chat.ask(allSegments, openRouter.apiKey, openRouter.model, question);
   };
 
   return (
@@ -173,8 +208,9 @@ export default function Home() {
               Enclave AI
             </h1>
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              Runs entirely in this browser — audio, transcription, and history never leave
-              your device.
+              {micEngine === "cloud"
+                ? "Your voice is transcribed via your browser's cloud speech service (fast, but sent off-device). Participants' audio stays fully local via on-device Whisper."
+                : "Runs entirely in this browser — audio, transcription, and history never leave your device."}
             </p>
           </div>
           <div className="flex shrink-0 gap-2">
@@ -204,6 +240,12 @@ export default function Home() {
         {transcription.modelStatus !== "error" && transcription.errorMessage && (
           <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
             {transcription.errorMessage}
+          </div>
+        )}
+
+        {webSpeech.errorMessage && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            {webSpeech.errorMessage}
           </div>
         )}
 
@@ -275,9 +317,13 @@ export default function Home() {
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <LevelMeter label="You (mic)" active={isRecording} stats={state.mic} />
           <LevelMeter
-            label="Participants (tab/system)"
+            label={`You (mic) — ${micEngine === "cloud" ? "cloud" : "local"}`}
+            active={isRecording}
+            stats={state.mic}
+          />
+          <LevelMeter
+            label="Participants (tab/system) — local"
             active={isRecording && state.participantsActive}
             stats={state.participants}
           />
@@ -286,13 +332,13 @@ export default function Home() {
         <div className="flex flex-col gap-2">
           <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Transcript</h2>
           <div className="h-64 overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
-            {transcription.segments.length === 0 ? (
+            {allSegments.length === 0 && !webSpeech.interimText ? (
               <p className="text-sm text-zinc-400">
                 {isRecording ? "Listening…" : "Start a meeting to see a live transcript."}
               </p>
             ) : (
               <div className="flex flex-col gap-2">
-                {transcription.segments.map((segment, i) => (
+                {allSegments.map((segment, i) => (
                   <div key={`${segment.channel}-${segment.start}-${i}`} className="text-sm">
                     <span className="mr-2 font-mono text-xs text-zinc-400">
                       {formatTimestamp(segment.start)}
@@ -309,6 +355,13 @@ export default function Home() {
                     <span className="text-zinc-800 dark:text-zinc-200">{segment.text}</span>
                   </div>
                 ))}
+                {webSpeech.interimText && (
+                  <div className="text-sm italic text-zinc-400">
+                    <span className="mr-2 font-mono text-xs text-zinc-400">…</span>
+                    <span className="font-medium text-emerald-700/70 dark:text-emerald-400/70">You: </span>
+                    {webSpeech.interimText}
+                  </div>
+                )}
                 <div ref={transcriptEndRef} />
               </div>
             )}
@@ -321,11 +374,7 @@ export default function Home() {
             <button
               type="button"
               onClick={handleGenerateSummary}
-              disabled={
-                !openRouter.hasApiKey ||
-                transcription.segments.length === 0 ||
-                summary.status === "loading"
-              }
+              disabled={!openRouter.hasApiKey || allSegments.length === 0 || summary.status === "loading"}
               className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
             >
               {summary.status === "loading" ? "Generating…" : "Generate summary"}
@@ -341,7 +390,7 @@ export default function Home() {
               <p className="text-sm text-red-600 dark:text-red-400">{summary.errorMessage}</p>
             ) : summary.status === "idle" ? (
               <p className="text-sm text-zinc-400">
-                {transcription.segments.length === 0
+                {allSegments.length === 0
                   ? "Record a meeting, then generate a summary."
                   : "Ready when you are."}
               </p>
@@ -363,7 +412,7 @@ export default function Home() {
               messages={chat.messages}
               status={chat.status}
               errorMessage={chat.errorMessage}
-              disabled={transcription.segments.length === 0}
+              disabled={allSegments.length === 0}
               onAsk={handleAsk}
             />
           </div>

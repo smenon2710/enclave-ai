@@ -7,7 +7,7 @@ const MODEL_STORAGE_KEY = "enclave-ai:openrouter-model";
 // OpenRouter's own free-tier auto-router — always $0, self-maintaining
 // (picks from whatever free models are currently available rather than us
 // hardcoding a specific model ID that could get deprecated/renamed).
-const DEFAULT_MODEL = "openrouter/free";
+export const DEFAULT_OPENROUTER_MODEL = "openrouter/free";
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -26,7 +26,7 @@ function getApiKeySnapshot(): string {
 }
 
 function getModelSnapshot(): string {
-  return localStorage.getItem(MODEL_STORAGE_KEY) ?? DEFAULT_MODEL;
+  return localStorage.getItem(MODEL_STORAGE_KEY) ?? DEFAULT_OPENROUTER_MODEL;
 }
 
 function getApiKeyServerSnapshot(): string {
@@ -34,7 +34,7 @@ function getApiKeyServerSnapshot(): string {
 }
 
 function getModelServerSnapshot(): string {
-  return DEFAULT_MODEL;
+  return DEFAULT_OPENROUTER_MODEL;
 }
 
 /**
@@ -58,7 +58,7 @@ export function useOpenRouterSettings() {
   }, []);
 
   const setModel = useCallback((value: string) => {
-    localStorage.setItem(MODEL_STORAGE_KEY, value || DEFAULT_MODEL);
+    localStorage.setItem(MODEL_STORAGE_KEY, value || DEFAULT_OPENROUTER_MODEL);
     emitChange();
   }, []);
 

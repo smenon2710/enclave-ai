@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { fetchAvailableModels, type OpenRouterModel } from "@/lib/openrouter/models";
 import { WHISPER_MODELS } from "@/lib/stt/models";
+import { DEFAULT_OPENROUTER_MODEL } from "@/hooks/useOpenRouterSettings";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -106,14 +107,23 @@ export function SettingsModal({
 
         <div className="mt-4 flex items-center justify-between">
           <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Model</label>
-          <label className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-            <input
-              type="checkbox"
-              checked={freeOnly}
-              onChange={(e) => setFreeOnly(e.target.checked)}
-            />
-            Free only
-          </label>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+              <input
+                type="checkbox"
+                checked={freeOnly}
+                onChange={(e) => setFreeOnly(e.target.checked)}
+              />
+              Free only
+            </label>
+            <button
+              type="button"
+              onClick={() => setDraftModel(DEFAULT_OPENROUTER_MODEL)}
+              className="text-xs text-zinc-500 underline hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+            >
+              Reset to default
+            </button>
+          </div>
         </div>
         <input
           list="openrouter-models"
@@ -136,6 +146,15 @@ export function SettingsModal({
             directly.
           </p>
         )}
+        {!modelsError &&
+          models.length > 0 &&
+          draftModel.trim().length > 0 &&
+          !models.some((m) => m.id === draftModel.trim()) && (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+              &quot;{draftModel.trim()}&quot; doesn&apos;t match any known OpenRouter model ID —
+              check for typos, or pick one from the list above.
+            </p>
+          )}
 
         <div className="mt-5 flex justify-end gap-2">
           <button
