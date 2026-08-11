@@ -125,15 +125,18 @@ export default function Home() {
     [transcription, micEngine]
   );
 
-  const { state, startMeeting, stopMeeting } = useMeetingRecorder(handlePCMChunk);
+  const { state, startMeeting, stopMeeting, resetToIdle } = useMeetingRecorder(handlePCMChunk);
   const isRecording = state.status === "recording";
   const isBusy = state.status === "requesting-mic" || state.status === "requesting-participants";
   // WhisperEngine serializes transcribe() calls through one queue — if live
   // transcription falls behind real-time during a long/busy call, a backlog
   // can still be draining after Stop is clicked (flushAll just adds two more
   // jobs to the end of it). Summary/Ask should wait for it, not run against
-  // a transcript that's still missing its last stretch.
-  const isFinalizingTranscript = transcription.pendingJobCount > 0;
+  // a transcript that's still missing its last stretch. Scoped to "stopped"
+  // only — pendingJobCount is also nonzero continuously *during* normal live
+  // recording (a window is always in flight), where "finalizing" would be a
+  // misleading label and there's no reason to block Summary/Ask anyway.
+  const isFinalizingTranscript = state.status === "stopped" && transcription.pendingJobCount > 0;
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const currentMeetingRef = useRef<{ id: string; startedAt: number } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -201,6 +204,19 @@ export default function Home() {
     webSpeech.stop();
   };
 
+  // Clears a finished meeting's transcript/summary/chat back to a blank
+  // "ready" screen without prompting for mic/participants permissions again
+  // — a deliberate, separate action from Start (which resets the same state
+  // as a side effect of immediately starting the next recording).
+  const handleNewMeeting = () => {
+    currentMeetingRef.current = null;
+    transcription.reset();
+    webSpeech.reset();
+    summary.reset();
+    chat.reset();
+    resetToIdle();
+  };
+
   const handleGenerateSummary = () => {
     void summary.generate(allSegments, openRouter.apiKey, openRouter.model);
   };
@@ -209,9 +225,19 @@ export default function Home() {
     void chat.ask(allSegments, openRouter.apiKey, openRouter.model, question);
   };
 
+  // Purely cosmetic: whether to render the wrapping banner container at all,
+  // so it doesn't leave an empty gapped div when nothing needs showing. Each
+  // banner below still applies its own (more specific) condition.
+  const hasBanners =
+    transcription.modelStatus !== "ready" ||
+    !!transcription.errorMessage ||
+    !!webSpeech.errorMessage ||
+    !state.participantsSupported ||
+    (state.status === "error" && !!state.errorMessage);
+
   return (
-    <div className="flex flex-1 flex-col items-center bg-zinc-50 px-6 font-sans dark:bg-black">
-      <main className="flex w-full max-w-xl flex-col gap-6 py-10 sm:py-16">
+    <div className="flex flex-1 flex-col items-center bg-zinc-50 px-4 font-sans dark:bg-black sm:px-6">
+      <main className="flex w-full max-w-6xl flex-col gap-6 py-8 sm:py-12">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
@@ -241,211 +267,247 @@ export default function Home() {
           </div>
         </div>
 
-        <ModelStatusBanner
-          status={transcription.modelStatus}
-          progress={transcription.downloadProgress}
-          errorMessage={transcription.errorMessage}
-        />
+        {hasBanners && (
+          <div className="flex flex-col gap-2">
+            <ModelStatusBanner
+              status={transcription.modelStatus}
+              progress={transcription.downloadProgress}
+              errorMessage={transcription.errorMessage}
+            />
 
-        {transcription.modelStatus !== "error" && transcription.errorMessage && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            {transcription.errorMessage}
-          </div>
-        )}
+            {transcription.modelStatus !== "error" && transcription.errorMessage && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                {transcription.errorMessage}
+              </div>
+            )}
 
-        {webSpeech.errorMessage && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            {webSpeech.errorMessage}
-          </div>
-        )}
+            {webSpeech.errorMessage && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                {webSpeech.errorMessage}
+              </div>
+            )}
 
-        {!state.participantsSupported && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            This browser doesn&apos;t support tab/system audio sharing — you&apos;ll only be able to
-            capture your microphone. Use Chrome or Edge for full dual-channel capture.
-          </div>
-        )}
+            {!state.participantsSupported && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                This browser doesn&apos;t support tab/system audio sharing — you&apos;ll only be
+                able to capture your microphone. Use Chrome or Edge for full dual-channel capture.
+              </div>
+            )}
 
-        {state.participantsSupported && !isRecording && (
-          <p className="text-xs text-zinc-500 dark:text-zinc-500">
-            Starting will also prompt you to share a tab/screen — that&apos;s the browser&apos;s
-            only way to hand a page access to audio playing on your device (the other people on
-            the call). Only its audio track is used; the video track is discarded immediately and
-            never recorded, transcribed, or sent anywhere.
-          </p>
-        )}
-
-        {state.status === "error" && state.errorMessage && (
-          <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-            {state.errorMessage}
-          </div>
-        )}
-
-        {micDevices.length > 1 && !isRecording && (
-          <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
-            Microphone
-            <select
-              value={micDeviceId}
-              onChange={(e) => setMicDeviceId(e.target.value)}
-              className="min-w-0 flex-1 rounded-md border border-black/10 bg-transparent px-2 py-1 text-sm dark:border-white/10"
-            >
-              <option value="">Browser default</option>
-              {micDevices.map((d) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-
-        <div className="flex flex-wrap items-center gap-3">
-          {!isRecording ? (
-            <button
-              type="button"
-              onClick={() => void handleStart()}
-              disabled={isBusy || transcription.modelStatus !== "ready"}
-              className="rounded-full bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
-            >
-              {state.status === "requesting-mic"
-                ? "Requesting microphone…"
-                : state.status === "requesting-participants"
-                  ? "Requesting participants audio…"
-                  : "Start meeting"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void handleStop()}
-              className="rounded-full border border-red-300 px-5 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
-            >
-              Stop meeting
-            </button>
-          )}
-          {isRecording && (
-            <span className="flex items-center gap-1.5 text-sm font-medium text-red-600 dark:text-red-400">
-              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
-              Recording
-            </span>
-          )}
-          {(isRecording || state.status === "stopped") && (
-            <span className="font-mono text-sm text-zinc-500 dark:text-zinc-400">
-              {formatElapsed(state.elapsedSeconds)}
-            </span>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <LevelMeter
-            label={`You (mic) — ${micEngine === "cloud" ? "cloud" : "local"}`}
-            active={isRecording}
-            stats={state.mic}
-          />
-          <LevelMeter
-            label="Participants (tab/system) — local"
-            active={isRecording && state.participantsActive}
-            stats={state.participants}
-          />
-        </div>
-
-        <div className="flex flex-col gap-2">
-          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Transcript</h2>
-          <div className="h-64 overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
-            {allSegments.length === 0 && !webSpeech.interimText ? (
-              <p className="text-sm text-zinc-400">
-                {isRecording ? "Listening…" : "Start a meeting to see a live transcript."}
-              </p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {allSegments.map((segment, i) => (
-                  <div key={`${segment.channel}-${segment.start}-${i}`} className="text-sm">
-                    <span className="mr-2 font-mono text-xs text-zinc-400">
-                      {formatTimestamp(segment.start)}
-                    </span>
-                    <span
-                      className={
-                        segment.channel === "mic"
-                          ? "font-medium text-emerald-700 dark:text-emerald-400"
-                          : "font-medium text-sky-700 dark:text-sky-400"
-                      }
-                    >
-                      {segment.channel === "mic" ? "You: " : "Participants: "}
-                    </span>
-                    <span className="text-zinc-800 dark:text-zinc-200">{segment.text}</span>
-                  </div>
-                ))}
-                {webSpeech.interimText && (
-                  <div className="text-sm italic text-zinc-400">
-                    <span className="mr-2 font-mono text-xs text-zinc-400">…</span>
-                    <span className="font-medium text-emerald-700/70 dark:text-emerald-400/70">You: </span>
-                    {webSpeech.interimText}
-                  </div>
-                )}
-                <div ref={transcriptEndRef} />
+            {state.status === "error" && state.errorMessage && (
+              <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                {state.errorMessage}
               </div>
             )}
           </div>
-        </div>
-
-        {isFinalizingTranscript && (
-          <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
-            Finalizing transcript — still processing the last bit of local audio. Summary and Ask
-            are disabled until this settles so they don&apos;t run against a partial transcript.
-          </div>
         )}
 
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Summary</h2>
-            <button
-              type="button"
-              onClick={handleGenerateSummary}
-              disabled={
-                !openRouter.hasApiKey ||
-                allSegments.length === 0 ||
-                summary.status === "loading" ||
-                isFinalizingTranscript
-              }
-              className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
-            >
-              {summary.status === "loading" ? "Generating…" : "Generate summary"}
-            </button>
+        {/* Session controls — mic picker, start/stop/new-meeting, and the
+            live level meters live together in one panel so the "control the
+            live session" concerns are visually grouped and separate from the
+            transcript/summary/ask content below. */}
+        <div className="flex flex-col gap-4 rounded-xl border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-zinc-950 sm:p-5">
+          {state.participantsSupported && !isRecording && (
+            <p className="text-xs text-zinc-500 dark:text-zinc-500">
+              Starting will also prompt you to share a tab/screen — that&apos;s the browser&apos;s
+              only way to hand a page access to audio playing on your device (the other people on
+              the call). Only its audio track is used; the video track is discarded immediately
+              and never recorded, transcribed, or sent anywhere.
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3">
+            {!isRecording ? (
+              <button
+                type="button"
+                onClick={() => void handleStart()}
+                disabled={isBusy || transcription.modelStatus !== "ready"}
+                className="rounded-full bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
+              >
+                {state.status === "requesting-mic"
+                  ? "Requesting microphone…"
+                  : state.status === "requesting-participants"
+                    ? "Requesting participants audio…"
+                    : "Start meeting"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleStop()}
+                className="rounded-full border border-red-300 px-5 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+              >
+                Stop meeting
+              </button>
+            )}
+
+            {state.status === "stopped" && (
+              <button
+                type="button"
+                onClick={handleNewMeeting}
+                className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+              >
+                New meeting
+              </button>
+            )}
+
+            {isRecording && (
+              <span className="flex items-center gap-1.5 text-sm font-medium text-red-600 dark:text-red-400">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                Recording
+              </span>
+            )}
+            {(isRecording || state.status === "stopped") && (
+              <span className="font-mono text-sm text-zinc-500 dark:text-zinc-400">
+                {formatElapsed(state.elapsedSeconds)}
+              </span>
+            )}
+
+            {micDevices.length > 1 && !isRecording && (
+              <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400 sm:ml-auto">
+                Microphone
+                <select
+                  value={micDeviceId}
+                  onChange={(e) => setMicDeviceId(e.target.value)}
+                  className="min-w-0 max-w-56 rounded-md border border-black/10 bg-transparent px-2 py-1 text-sm dark:border-white/10"
+                >
+                  <option value="">Browser default</option>
+                  {micDevices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
 
-          <div className="rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
-            {!openRouter.hasApiKey ? (
-              <p className="text-sm text-zinc-400">
-                Add your OpenRouter API key in Settings to enable summaries.
-              </p>
-            ) : summary.status === "error" ? (
-              <p className="text-sm text-red-600 dark:text-red-400">{summary.errorMessage}</p>
-            ) : summary.status === "idle" ? (
-              <p className="text-sm text-zinc-400">
-                {allSegments.length === 0
-                  ? "Record a meeting, then generate a summary."
-                  : "Ready when you are."}
-              </p>
-            ) : summary.status === "loading" ? (
-              <p className="text-sm text-zinc-400">Asking {openRouter.model}…</p>
-            ) : (
-              <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-800 dark:text-zinc-200">
-                {summary.summary}
-              </pre>
-            )}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <LevelMeter
+              label={`You (mic) — ${micEngine === "cloud" ? "cloud" : "local"}`}
+              active={isRecording}
+              stats={state.mic}
+            />
+            <LevelMeter
+              label="Participants (tab/system) — local"
+              active={isRecording && state.participantsActive}
+              stats={state.participants}
+            />
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
-          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Ask</h2>
-          <div className="rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
-            <MeetingChat
-              hasApiKey={openRouter.hasApiKey}
-              messages={chat.messages}
-              status={chat.status}
-              errorMessage={chat.errorMessage}
-              disabled={allSegments.length === 0 || isFinalizingTranscript}
-              onAsk={handleAsk}
-            />
+        {/* Transcript is the main, wide content; Summary/Ask form a sidebar
+            on large screens (sticky, so they stay visible while scrolling a
+            long transcript) and stack below it on narrow screens. */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Transcript</h2>
+              {allSegments.length > 0 && (
+                <span className="text-xs text-zinc-400">{allSegments.length} segments</span>
+              )}
+            </div>
+            <div className="h-[24rem] overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950 lg:h-[32rem]">
+              {allSegments.length === 0 && !webSpeech.interimText ? (
+                <p className="text-sm text-zinc-400">
+                  {isRecording ? "Listening…" : "Start a meeting to see a live transcript."}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {allSegments.map((segment, i) => (
+                    <div key={`${segment.channel}-${segment.start}-${i}`} className="text-sm">
+                      <span className="mr-2 font-mono text-xs text-zinc-400">
+                        {formatTimestamp(segment.start)}
+                      </span>
+                      <span
+                        className={
+                          segment.channel === "mic"
+                            ? "font-medium text-emerald-700 dark:text-emerald-400"
+                            : "font-medium text-sky-700 dark:text-sky-400"
+                        }
+                      >
+                        {segment.channel === "mic" ? "You: " : "Participants: "}
+                      </span>
+                      <span className="text-zinc-800 dark:text-zinc-200">{segment.text}</span>
+                    </div>
+                  ))}
+                  {webSpeech.interimText && (
+                    <div className="text-sm italic text-zinc-400">
+                      <span className="mr-2 font-mono text-xs text-zinc-400">…</span>
+                      <span className="font-medium text-emerald-700/70 dark:text-emerald-400/70">
+                        You:{" "}
+                      </span>
+                      {webSpeech.interimText}
+                    </div>
+                  )}
+                  <div ref={transcriptEndRef} />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-6 lg:sticky lg:top-6">
+            {isFinalizingTranscript && (
+              <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
+                Finalizing transcript — still processing the last bit of local audio. Summary and
+                Ask are disabled until this settles so they don&apos;t run against a partial
+                transcript.
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Summary</h2>
+                <button
+                  type="button"
+                  onClick={handleGenerateSummary}
+                  disabled={
+                    !openRouter.hasApiKey ||
+                    allSegments.length === 0 ||
+                    summary.status === "loading" ||
+                    isFinalizingTranscript
+                  }
+                  className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                >
+                  {summary.status === "loading" ? "Generating…" : "Generate summary"}
+                </button>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
+                {!openRouter.hasApiKey ? (
+                  <p className="text-sm text-zinc-400">
+                    Add your OpenRouter API key in Settings to enable summaries.
+                  </p>
+                ) : summary.status === "error" ? (
+                  <p className="text-sm text-red-600 dark:text-red-400">{summary.errorMessage}</p>
+                ) : summary.status === "idle" ? (
+                  <p className="text-sm text-zinc-400">
+                    {allSegments.length === 0
+                      ? "Record a meeting, then generate a summary."
+                      : "Ready when you are."}
+                  </p>
+                ) : summary.status === "loading" ? (
+                  <p className="text-sm text-zinc-400">Asking {openRouter.model}…</p>
+                ) : (
+                  <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-800 dark:text-zinc-200">
+                    {summary.summary}
+                  </pre>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Ask</h2>
+              <div className="rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
+                <MeetingChat
+                  hasApiKey={openRouter.hasApiKey}
+                  messages={chat.messages}
+                  status={chat.status}
+                  errorMessage={chat.errorMessage}
+                  disabled={allSegments.length === 0 || isFinalizingTranscript}
+                  onAsk={handleAsk}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </main>

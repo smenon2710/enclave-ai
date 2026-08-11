@@ -88,6 +88,26 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     }));
   }, []);
 
+  /**
+   * Clears a finished meeting's stats back to the pre-meeting idle state
+   * without touching permissions/capture — distinct from startMeeting, which
+   * immediately re-prompts. Lets the UI go back to a blank "ready" screen on
+   * demand rather than only ever resetting as a side effect of starting the
+   * next recording.
+   */
+  const resetToIdle = useCallback(() => {
+    chunksRef.current = { mic: [], participants: [] };
+    setState((prev) => ({
+      ...prev,
+      status: "idle",
+      errorMessage: null,
+      participantsActive: false,
+      mic: EMPTY_CHANNEL_STATS,
+      participants: EMPTY_CHANNEL_STATS,
+      elapsedSeconds: 0,
+    }));
+  }, []);
+
   const stopMeeting = useCallback(async () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -175,5 +195,5 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     };
   }, []);
 
-  return { state, startMeeting, stopMeeting };
+  return { state, startMeeting, stopMeeting, resetToIdle };
 }
