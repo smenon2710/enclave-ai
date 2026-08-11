@@ -256,6 +256,15 @@ export default function Home() {
           </div>
         )}
 
+        {state.participantsSupported && !isRecording && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-500">
+            Starting will also prompt you to share a tab/screen — that&apos;s the browser&apos;s
+            only way to hand a page access to audio playing on your device (the other people on
+            the call). Only its audio track is used; the video track is discarded immediately and
+            never recorded, transcribed, or sent anywhere.
+          </p>
+        )}
+
         {state.status === "error" && state.errorMessage && (
           <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
             {state.errorMessage}
