@@ -53,7 +53,11 @@ self.onmessage = async (event) => {
       // real user confirmed the multi-threaded build hangs even outside
       // this project's sandboxed test environment — see plan.md §4.7),
       // so anything higher would be a no-op anyway.
-      const segments = self.Module.transcribe(ctxHandle, msg.audio, "en", 1, false);
+      // audioCtx caps the encoder's context to roughly the actual audio
+      // length instead of the model's full ~30s default -- see
+      // wasm-build/emscripten.cpp and useTranscription.ts's computeAudioCtx.
+      // 0 (unset) falls back to the WASM binding's own default (full context).
+      const segments = self.Module.transcribe(ctxHandle, msg.audio, "en", 1, false, msg.audioCtx ?? 0);
       self.postMessage({
         type: "transcribe-done",
         jobId: msg.jobId,

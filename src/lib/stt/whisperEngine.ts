@@ -45,6 +45,11 @@ export interface TranscribeOptions {
   channel: AudioChannelLabel;
   audio: Float32Array;
   offsetSeconds: number;
+  // Caps the encoder's context to roughly the actual audio length instead
+  // of the model's full ~30s default — see useTranscription.ts's
+  // computeAudioCtx. Omitted/0 falls back to the WASM binding's default
+  // (full context).
+  audioCtx?: number;
 }
 
 interface PendingJob {
@@ -165,6 +170,7 @@ export class WhisperEngine {
           jobId,
           channel: options.channel,
           audio: options.audio,
+          audioCtx: options.audioCtx ?? 0,
         });
       });
 

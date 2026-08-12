@@ -39,7 +39,17 @@ What the patches do, and why:
   segments via `whisper_full_get_segment_*` (`noSpeechProb` added after
   real-user testing surfaced `[BLANK_AUDIO]` hallucinations on silent audio
   polluting the transcript — `src/lib/stt/whisperEngine.ts` filters on it
-  client-side).
+  client-side). The `transcribe` binding also takes an `audio_ctx` parameter
+  (passed through from JS on every call — see
+  `src/hooks/useTranscription.ts`'s `AUDIO_CTX_UNITS`), added after a real
+  user reported a 5m26s recording taking over an hour to finalize: the
+  binding previously never set `whisper_full_params.audio_ctx`, so every
+  ~3s window paid for the model's full ~30s encoder context regardless of
+  actual audio length. Exposed as a JS-controlled parameter (default 0 =
+  unset/full context, preserving old behavior) rather than a hardcoded
+  value in this file, so the actual number can be tuned/re-verified from
+  the JS side without rebuilding this binary again — see
+  `useTranscription.ts` for the benchmark results that led to 384.
 - **`whisper.wasm-CMakeLists.txt`** currently ships **without**
   `USE_PTHREADS`/`PTHREAD_POOL_SIZE_STRICT` (single-threaded — see History
   below for why), plus `FS` added to `EXPORTED_RUNTIME_METHODS` (needed for
@@ -100,6 +110,16 @@ emcmake cmake -B build-em -DCMAKE_BUILD_TYPE=Release
 emmake make -C build-em libmain
 cp build-em/bin/libmain.js ../../public/wasm/whisper/libmain.js
 ```
+
+**Known, not-yet-investigated follow-up:** the `emcmake cmake` configure step
+prints `GGML_SYSTEM_ARCH: UNKNOWN` / `Falling back to generic
+implementations` and `Adding CPU backend variant ggml-cpu: -DGGML_CPU_GENERIC`
+— ggml isn't auto-detecting a SIMD-capable target for the Emscripten build,
+so this binary may be running scalar (non-SIMD) code paths. Not pursued
+alongside the `audio_ctx` fix above to keep that change isolated and
+independently verifiable; worth a real investigation (likely an explicit
+`-msimd128`/`GGML_WASM_SIMD`-equivalent CMake flag) as a separate follow-up
+if more speed is still needed after `audio_ctx`.
 
 ## 4. Re-enabling pthreads (not recommended without new evidence)
 

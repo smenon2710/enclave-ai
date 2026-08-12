@@ -14,6 +14,32 @@ const SAMPLE_RATE = 16000;
 // speech shows up reasonably fast" against not fragmenting too aggressively.
 const WINDOW_SAMPLES = SAMPLE_RATE * 3;
 
+// Caps the encoder's context to a fraction of the model's full default
+// (~30s/1500 units), instead of leaving it unset — a real user reported a
+// 5m26s recording taking over an hour to finalize, which traced back to
+// this: every ~3s window was paying for the full 30s encoder context
+// regardless of actual audio length. Same technique whisper.cpp's own
+// stream.wasm/command.wasm examples use for real-time transcription
+// (hardcoded to 768 there, for their 10s rolling buffer).
+//
+// 384 is an empirically validated value for this app's ~3s windows, not a
+// formula. Benchmarked directly against the real WASM build (bypassing
+// getUserMedia/getDisplayMedia entirely — a Worker fed real TTS speech
+// audio, chopped into 3s windows) across two different real speech
+// passages (11 windows total): 512/384/256 all transcribed cleanly and
+// ~3.7x-7.5x faster than the unset default (tiny.en, this hardware). 182 (a
+// proportionally-computed "just enough for 3s" guess) produced duplicated/
+// hallucinated repeated text on one window in *each* test run — a worse
+// failure mode than slowness, since it corrupts the transcript silently (no
+// bracket tag, no high no_speech_prob, so the existing isRealSpeech filter
+// doesn't catch it — see whisperEngine.ts). 384 was chosen for headroom
+// above that failure point while still giving a real ~5x speedup over the
+// unset default (54.6s -> 10.9s for one 14s test passage). Applied
+// uniformly to the shorter trailing partial window on Stop too — a
+// larger-than-needed audio_ctx there costs a little unclaimed speedup, not
+// accuracy.
+const AUDIO_CTX_UNITS = 384;
+
 export type ModelStatus = "idle" | "downloading" | "initializing" | "ready" | "error";
 
 // Cap auto-restarts so a persistently broken engine surfaces a stable error
@@ -125,7 +151,7 @@ export function useTranscription(modelUrl: string) {
 
     setPendingJobCount((c) => c + 1);
     engine
-      .transcribe({ channel, audio, offsetSeconds })
+      .transcribe({ channel, audio, offsetSeconds, audioCtx: AUDIO_CTX_UNITS })
       .then((newSegments) => {
         if (newSegments.length === 0) return;
         setSegments((prev) => [...prev, ...newSegments].sort((a, b) => a.start - b.start));

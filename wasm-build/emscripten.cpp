@@ -40,7 +40,7 @@ EMSCRIPTEN_BINDINGS(whisper) {
     // main thread, and returning structured segments directly (instead of
     // scraping printf output for `[HH:MM:SS.mmm --> ...]` lines) is more
     // robust than text parsing.
-    emscripten::function("transcribe", emscripten::optional_override([](size_t index, const emscripten::val & audio, const std::string & lang, int nthreads, bool translate) {
+    emscripten::function("transcribe", emscripten::optional_override([](size_t index, const emscripten::val & audio, const std::string & lang, int nthreads, bool translate, int audio_ctx) {
         --index;
 
         if (index >= g_contexts.size() || g_contexts[index] == nullptr) {
@@ -59,6 +59,14 @@ EMSCRIPTEN_BINDINGS(whisper) {
         params.language         = is_multilingual ? lang.c_str() : "en";
         params.n_threads        = nthreads;
         params.offset_ms        = 0;
+        // Caps the encoder's context to roughly the actual audio length
+        // instead of the model's full ~30s/1500-unit default (0 = default,
+        // matching whisper.cpp's own convention, kept as an escape hatch).
+        // Left as a JS-controlled parameter rather than a hardcoded value
+        // here (unlike upstream's stream.wasm/command.wasm examples, which
+        // hardcode 768) so the actual value can be tuned/verified from the
+        // JS side without rebuilding this binary again.
+        params.audio_ctx        = audio_ctx;
 
         const int n = audio["length"].as<int>();
         std::vector<float> pcmf32(n);
