@@ -13,6 +13,8 @@ interface SettingsModalProps {
   onModelChange: (value: string) => void;
   sttModelId: string;
   onSttModelChange: (value: string) => void;
+  forceLocalMic: boolean;
+  onForceLocalMicChange: (value: boolean) => void;
 }
 
 /** Parent only mounts this while open, so draft state below initializes fresh from current props each time — no sync-on-open effect needed. */
@@ -24,10 +26,13 @@ export function SettingsModal({
   onModelChange,
   sttModelId,
   onSttModelChange,
+  forceLocalMic,
+  onForceLocalMicChange,
 }: SettingsModalProps) {
   const [draftKey, setDraftKey] = useState(apiKey);
   const [draftModel, setDraftModel] = useState(model);
   const [draftSttModelId, setDraftSttModelId] = useState(sttModelId);
+  const [draftForceLocalMic, setDraftForceLocalMic] = useState(forceLocalMic);
   const [models, setModels] = useState<OpenRouterModel[]>([]);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [freeOnly, setFreeOnly] = useState(true);
@@ -46,6 +51,7 @@ export function SettingsModal({
     onApiKeyChange(draftKey.trim());
     onModelChange(draftModel.trim());
     onSttModelChange(draftSttModelId);
+    onForceLocalMicChange(draftForceLocalMic);
     onClose();
   };
 
@@ -83,6 +89,28 @@ export function SettingsModal({
               </label>
             ))}
           </div>
+
+          <label className="mt-3 flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={draftForceLocalMic}
+              onChange={(e) => setDraftForceLocalMic(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span className="text-sm">
+              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                Always transcribe my voice locally too
+              </span>
+              <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                By default your voice goes through your browser&apos;s cloud speech service when
+                available (faster, but it leaves your device, and it has no way to honor the
+                microphone picker above — it always captures whatever it resolves internally as
+                &quot;the&quot; mic, regardless of what&apos;s selected here). Check this to use the
+                same on-device Whisper engine as Participants for your own voice instead — slower,
+                but fully local and respects your selected microphone.
+              </p>
+            </span>
+          </label>
         </div>
 
         <hr className="my-4 border-black/10 dark:border-white/10" />

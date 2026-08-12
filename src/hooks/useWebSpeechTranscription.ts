@@ -60,6 +60,9 @@ export function useWebSpeechTranscription() {
   const shouldRunRef = useRef(false);
   const startTimeRef = useRef(0);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirrors interimText so onend (a plain DOM event handler, not a React
+  // effect) can read the latest value synchronously — see onend below.
+  const interimTextRef = useRef("");
 
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [interimText, setInterimText] = useState("");
@@ -127,6 +130,7 @@ export function useWebSpeechTranscription() {
           interim += text;
         }
       }
+      interimTextRef.current = interim;
       setInterimText(interim);
     };
 
@@ -139,6 +143,21 @@ export function useWebSpeechTranscription() {
     };
 
     recognition.onend = () => {
+      // Chrome can end a recognition "turn" (continuous=true notwithstanding
+      // — see the restart below) while a short utterance is still sitting as
+      // *interim*, never having reached isFinal. onresult's isFinal branch
+      // is the only place segments get created, so that text would
+      // otherwise vanish with zero trace — a real user reported exactly
+      // this: brief interjections ("OK") never appearing in "You:" at all.
+      // Salvage it as a best-effort final segment before restarting/idling.
+      if (interimTextRef.current) {
+        const elapsed = (Date.now() - startTimeRef.current) / 1000;
+        const text = interimTextRef.current;
+        interimTextRef.current = "";
+        setSegments((prev) => [...prev, { channel: "mic", start: elapsed, end: elapsed, text }]);
+        setInterimText("");
+      }
+
       if (shouldRunRef.current) {
         // Chrome stops continuous recognition periodically on its own even
         // with continuous=true — restart to sustain it through a meeting.
@@ -170,6 +189,7 @@ export function useWebSpeechTranscription() {
   }, [clearWatchdog]);
 
   const reset = useCallback(() => {
+    interimTextRef.current = "";
     setSegments([]);
     setInterimText("");
     setErrorMessage(null);

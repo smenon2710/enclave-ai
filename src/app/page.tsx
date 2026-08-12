@@ -10,6 +10,7 @@ import { useMeetingChat } from "@/hooks/useMeetingChat";
 import { useMeetingHistory } from "@/hooks/useMeetingHistory";
 import { useMicrophoneDevice } from "@/hooks/useMicrophoneDevice";
 import { useSttModelSettings } from "@/hooks/useSttModelSettings";
+import { useForceLocalMic } from "@/hooks/useMicTranscriptionSettings";
 import { getWhisperModelUrl } from "@/lib/stt/models";
 import type { PCMChunk } from "@/lib/audio/types";
 import { SettingsModal } from "@/components/SettingsModal";
@@ -109,12 +110,18 @@ export default function Home() {
 
   // "cloud" (Web Speech API — fast, but your voice is sent to the browser
   // vendor's recognition service) when available, else "local" (whisper.cpp,
-  // same engine as Participants).
-  const micEngine = useMicEngine();
+  // same engine as Participants). The Settings toggle below can force
+  // "local" even when the cloud path is available — Web Speech has no way
+  // to accept a deviceId or MediaStream, so it silently ignores the
+  // microphone picker above and always captures whatever it resolves
+  // internally as "the" mic; whisper.cpp's getUserMedia path does respect it.
+  const forceLocalMic = useForceLocalMic();
+  const detectedMicEngine = useMicEngine();
+  const micEngine = forceLocalMic.forceLocal ? "local" : detectedMicEngine;
 
   const handlePCMChunk = useCallback(
     (chunk: PCMChunk) => {
-      // Mic audio only goes to whisper when Web Speech isn't available —
+      // Mic audio only goes to whisper when Web Speech isn't handling it —
       // otherwise Web Speech handles mic transcription and whisper only
       // processes Participants (which Web Speech can't capture at all, see
       // useWebSpeechTranscription.ts).
@@ -137,6 +144,23 @@ export default function Home() {
   // recording (a window is always in flight), where "finalizing" would be a
   // misleading label and there's no reason to block Summary/Ask anyway.
   const isFinalizingTranscript = state.status === "stopped" && transcription.pendingJobCount > 0;
+  // Surfaces exactly how long finalizing actually takes (a real user
+  // reported it feeling slow, with no way to tell how slow) — ticks while
+  // isFinalizingTranscript is true, resets once it clears.
+  // Reset to 0 happens in handleStop (a real event handler, not here) — this
+  // project's lint rules (React Compiler purity) forbid both reading Date.now()
+  // during render and calling setState synchronously in an effect body, so
+  // this effect only manages the ticking interval once finalizing is
+  // already known to be underway.
+  const [finalizingElapsedSeconds, setFinalizingElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!isFinalizingTranscript) return;
+    const startedAt = Date.now();
+    const interval = setInterval(() => {
+      setFinalizingElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isFinalizingTranscript]);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const currentMeetingRef = useRef<{ id: string; startedAt: number } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -199,6 +223,7 @@ export default function Home() {
   };
 
   const handleStop = async () => {
+    setFinalizingElapsedSeconds(0);
     await stopMeeting();
     transcription.flushAll();
     webSpeech.stop();
@@ -448,9 +473,9 @@ export default function Home() {
           <div className="flex flex-col gap-6 lg:sticky lg:top-6">
             {isFinalizingTranscript && (
               <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
-                Finalizing transcript — still processing the last bit of local audio. Summary and
-                Ask are disabled until this settles so they don&apos;t run against a partial
-                transcript.
+                Finalizing transcript — still processing the last bit of local audio (
+                {finalizingElapsedSeconds}s and counting). Summary and Ask are disabled until this
+                settles so they don&apos;t run against a partial transcript.
               </div>
             )}
 
@@ -521,6 +546,8 @@ export default function Home() {
           onModelChange={openRouter.setModel}
           sttModelId={sttModel.modelId}
           onSttModelChange={sttModel.setModelId}
+          forceLocalMic={forceLocalMic.forceLocal}
+          onForceLocalMicChange={forceLocalMic.setForceLocal}
         />
       )}
 
