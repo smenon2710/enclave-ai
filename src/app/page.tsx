@@ -467,6 +467,13 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        <footer className="mt-2 border-t border-hairline pt-4 text-xs leading-relaxed text-muted">
+          Recording other people may require their consent under the laws of your state, country,
+          or organization — you&apos;re responsible for knowing and following those rules before
+          you hit Start. This is a personal tool; its creator isn&apos;t responsible for how you
+          use it.
+        </footer>
       </main>
 
       {isSettingsOpen && (

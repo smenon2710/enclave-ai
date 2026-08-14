@@ -171,6 +171,8 @@ These are real limitations of the platform, not implementation gaps — worth be
 
 This is a personal-use tool: no participant-facing consent UI is in scope (§5, Phase 5's recording indicator is a cue for you, not something the other party ever sees — and nothing in this architecture reaches their screen regardless). Recording-consent law is jurisdiction-dependent — some places are one-party consent (yours is enough), others require all parties' consent regardless of what any app displays. That's on you to handle outside the app; not something the app tracks or enforces. The user has explicitly directed that this remains out of scope for the app itself, given personal, non-distributed use.
 
+**Now surfaced directly in the app, not just here.** A standing disclaimer footer (`src/app/page.tsx`, below the Transcript/Summary/Ask content, always visible regardless of recording state) tells the user to know and follow their state/org's consent rules before hitting Start, and states the tool's creator isn't responsible for misuse — the same content as this section, just where it's actually read before someone takes the action that matters. This doesn't change the app's behavior or enforcement (still none, by the same explicit direction above) — it's a visibility improvement, not a new consent gate.
+
 ---
 
 ## 8. Verification & Test Suite
