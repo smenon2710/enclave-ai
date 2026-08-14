@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Enclave AI",
-  description: "Browser-based, privacy-first meeting assistant",
+  description: "Browser-based meeting assistant — transcribes via your own Groq API key",
   manifest: "/manifest.json",
   icons: {
     icon: [

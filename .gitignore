@@ -39,8 +39,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# ggml model weights — fetched from Hugging Face at runtime and cached
-# client-side in IndexedDB, not bundled in the repo. This local copy is only
-# for dev-server testing without hitting the network every reload.
-/public/models/*.bin

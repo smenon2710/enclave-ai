@@ -7,7 +7,7 @@ import {
   getParticipantsStream,
   isDisplayAudioCaptureSupported,
 } from "@/lib/audio/sources";
-import type { AudioChannelLabel, PCMChunk } from "@/lib/audio/types";
+import type { AudioChannelLabel, AudioWindow } from "@/lib/audio/types";
 
 export type MeetingStatus =
   | "idle"
@@ -18,8 +18,7 @@ export type MeetingStatus =
   | "error";
 
 export interface ChannelStats {
-  chunkCount: number;
-  sampleCount: number;
+  windowsSent: number;
   level: number;
 }
 
@@ -33,26 +32,14 @@ export interface MeetingRecorderState {
   elapsedSeconds: number;
 }
 
-const EMPTY_CHANNEL_STATS: ChannelStats = { chunkCount: 0, sampleCount: 0, level: 0 };
+const EMPTY_CHANNEL_STATS: ChannelStats = { windowsSent: 0, level: 0 };
 
-function rms(samples: Float32Array): number {
-  let sumSquares = 0;
-  for (let i = 0; i < samples.length; i += 1) {
-    sumSquares += samples[i] * samples[i];
-  }
-  return Math.sqrt(sumSquares / samples.length);
-}
-
-export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
+export function useMeetingRecorder(onAudioWindow?: (window: AudioWindow) => void) {
   const captureRef = useRef<MeetingAudioCapture | null>(null);
-  const chunksRef = useRef<Record<AudioChannelLabel, PCMChunk[]>>({
-    mic: [],
-    participants: [],
-  });
   const startTimeRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const onPCMChunkRef = useRef(onPCMChunk);
-  onPCMChunkRef.current = onPCMChunk;
+  const onAudioWindowRef = useRef(onAudioWindow);
+  onAudioWindowRef.current = onAudioWindow;
 
   // Assume support until proven otherwise so SSR and the client's first
   // render agree — the real check only runs client-side (see effect below),
@@ -74,18 +61,28 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     }));
   }, []);
 
-  const handleChunk = useCallback((chunk: PCMChunk) => {
-    chunksRef.current[chunk.channel].push(chunk);
-    onPCMChunkRef.current?.(chunk);
-    const level = rms(chunk.samples);
+  const handleLevel = useCallback((channel: AudioChannelLabel, level: number) => {
+    setState((prev) => ({ ...prev, [channel]: { ...prev[channel], level } }));
+  }, []);
+
+  const handleWindow = useCallback((window: AudioWindow) => {
+    onAudioWindowRef.current?.(window);
     setState((prev) => ({
       ...prev,
-      [chunk.channel]: {
-        chunkCount: prev[chunk.channel].chunkCount + 1,
-        sampleCount: prev[chunk.channel].sampleCount + chunk.samples.length,
-        level,
+      [window.channel]: {
+        ...prev[window.channel],
+        windowsSent: prev[window.channel].windowsSent + 1,
       },
     }));
+  }, []);
+
+  // Surfaces a channel's capture loop dying unexpectedly (see capture.ts's
+  // bounded start-retry) as a real, visible error rather than silently
+  // going quiet — matches this app's established pattern of never letting a
+  // capture failure fail silently (e.g. the AudioContext-suspended and
+  // Web-Speech-watchdog fixes from earlier).
+  const handleCaptureError = useCallback((message: string) => {
+    setState((prev) => ({ ...prev, errorMessage: message }));
   }, []);
 
   /**
@@ -96,7 +93,6 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
    * next recording.
    */
   const resetToIdle = useCallback(() => {
-    chunksRef.current = { mic: [], participants: [] };
     setState((prev) => ({
       ...prev,
       status: "idle",
@@ -121,15 +117,12 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
   }, []);
 
   const startMeeting = useCallback(async (micDeviceId?: string): Promise<number | null> => {
-    chunksRef.current = { mic: [], participants: [] };
     // Single wall-clock origin for the whole meeting, captured before any
-    // async gap (permission prompts etc). The AudioContext created inside
-    // capture.prime() right below effectively starts its own currentTime
-    // clock at this same instant, so whisper-transcribed segments (which use
-    // that clock — see useTranscription.ts) and Web Speech segments (which
-    // need this epoch passed in explicitly — see page.tsx) end up on a
-    // single shared timeline instead of each channel/engine starting its
-    // own clock at 0 whenever it happens to actually begin capturing.
+    // async gap (permission prompts etc). Every audio window's offsetSeconds
+    // (see capture.ts) is measured against this same instant instead of each
+    // channel starting its own clock whenever it happens to actually begin
+    // capturing — participants capture in particular can start well after
+    // mic, once the share-picker dialog resolves.
     const meetingEpochMs = Date.now();
     setState((prev) => ({
       ...prev,
@@ -149,9 +142,15 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
       // doing it after would risk losing the click's user-gesture
       // association, which can leave the context silently suspended (see
       // MeetingAudioCapture.prime).
-      await capture.prime();
+      await capture.prime(meetingEpochMs);
       const micStream = await getMicStream(micDeviceId);
-      await capture.addChannel("mic", micStream, handleChunk);
+      await capture.addChannel(
+        "mic",
+        micStream,
+        (level) => handleLevel("mic", level),
+        handleWindow,
+        handleCaptureError
+      );
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -169,7 +168,13 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
     try {
       const participantsStream = await getParticipantsStream();
       if (participantsStream) {
-        await capture.addChannel("participants", participantsStream, handleChunk);
+        await capture.addChannel(
+          "participants",
+          participantsStream,
+          (level) => handleLevel("participants", level),
+          handleWindow,
+          handleCaptureError
+        );
         setState((prev) => ({ ...prev, participantsActive: true }));
       }
     } catch {
@@ -186,7 +191,7 @@ export function useMeetingRecorder(onPCMChunk?: (chunk: PCMChunk) => void) {
 
     setState((prev) => ({ ...prev, status: "recording" }));
     return meetingEpochMs;
-  }, [handleChunk]);
+  }, [handleLevel, handleWindow, handleCaptureError]);
 
   useEffect(() => {
     return () => {

@@ -1,25 +1,24 @@
 // Hand-rolled rather than a PWA build plugin (next-pwa/Workbox precache
 // generators assume webpack build hooks that may not line up with Next.js
-// 16's Turbopack build). Strategy: precache the stable-path assets that
-// matter for offline transcription (WASM binary, worker script, manifest),
-// then opportunistically cache every other same-origin GET response as it's
-// fetched, serving from cache first with a background revalidate. Content-
-// hashed Next.js chunk names change per build, so there's no fixed list to
-// precache for those — this "cache as you go" approach picks them up on the
-// first successful online visit instead.
+// 16's Turbopack build). Strategy: precache a couple of stable-path assets
+// for a faster repeat load, then opportunistically cache every other
+// same-origin GET response as it's fetched, serving from cache first with a
+// background revalidate. Content-hashed Next.js chunk names change per
+// build, so there's no fixed list to precache for those — this "cache as
+// you go" approach picks them up on the first successful online visit
+// instead.
 //
-// Cross-origin requests (Hugging Face model weights, OpenRouter API calls)
-// are explicitly left untouched: model bytes have their own cache in
-// IndexedDB (src/lib/stt/modelStore.ts), and OpenRouter responses must
-// always be live.
+// This no longer buys full offline *transcription* — both mic and
+// Participants audio go through Groq's cloud API now (see plan.md's
+// migration note), so recording always needs a live connection regardless
+// of what's cached here. This is just app-shell caching for a faster
+// reload, not an offline-capable core feature anymore.
+//
+// Cross-origin requests (Groq, OpenRouter) are explicitly left untouched —
+// those responses must always be live.
 
-const CACHE_NAME = "enclave-ai-v1";
-const PRECACHE_URLS = [
-  "/",
-  "/manifest.json",
-  "/wasm/whisper/libmain.js",
-  "/workers/whisper-worker.js",
-];
+const CACHE_NAME = "enclave-ai-v2";
+const PRECACHE_URLS = ["/", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

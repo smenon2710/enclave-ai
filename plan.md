@@ -5,7 +5,7 @@ This document outlines the architecture, technology stack, and execution roadmap
 
 It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeting audio via standard browser APIs, stores history locally in the browser, and — only if the user opts in — sends the finished transcript to an LLM of their choice via their own OpenRouter API key for summarization.
 
-**Transcription is a hybrid, not fully local, as of the real-user latency/accuracy feedback documented in §4.10.** Your own voice (mic) is transcribed via the browser's cloud speech service (Web Speech API — fast, accurate, but that audio leaves the device) when available, falling back to the local whisper.cpp WASM engine otherwise. Participants' audio (tab/system capture) always stays on-device via whisper.cpp, because the Web Speech API has no way to listen to anything but the microphone. See §4.10 for why, and §6 for the updated privacy model.
+**Transcription is fully cloud-based as of the Groq migration (§9), not local.** Both the mic ("You") and Participants (tab/system capture) channels are transcribed via Groq's Whisper API using the user's own key, sent directly from the browser. This supersedes the project's original local-first design (§3-§4 below, kept as historical record) and the hybrid Web Speech/whisper.cpp arrangement that followed real-user latency feedback (§4.10) — **§3 and §4's numbered list describe that earlier architecture and are no longer how the app works**; jump to §9 for the current pipeline and why it changed. §6 (Storage & Privacy Model) has been updated to reflect the current, fully-cloud state.
 
 ---
 
@@ -13,7 +13,7 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
 
 * **$0 Operating Cost (to you):** Static Next.js app on Vercel's free tier. No servers, no database, no per-user compute cost. LLM usage is billed to the *user's own* OpenRouter key, not to you.
 * **No Install, Works Anywhere:** Runs in any modern browser — share a link, no download, no OS-specific build.
-* **Transcription Stays Local — for Participants; hybrid for your own voice.** Speech-to-text never touches a server *we* control either way. Participants' audio always runs client-side via WASM Whisper. Your own mic audio runs through the browser's cloud speech service when available (see §4.10) — that audio does leave your device, to the browser vendor's recognition service, not to us.
+* **No Server We Control, Even Though Transcription Is Now Cloud-Based.** Both channels are transcribed via Groq's API using the user's own key, sent directly from the browser (§9) — audio leaves the device for both You and Participants now, a deliberate change from this project's original local-first design (kept as historical record in §3-§4). What hasn't changed: nothing is proxied through infrastructure this app operates.
 * **Bring Your Own LLM:** Users paste their own OpenRouter API key and pick a model. No key = transcription and history still work; only summarization is disabled.
 * **History Lives With the User:** Meeting history is stored in the browser (IndexedDB), not on a server — private by default, but device-local (see §6 for the tradeoff).
 
@@ -24,10 +24,9 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
 | Layer | Component | Choice |
 | :--- | :--- | :--- |
 | **Framework** | App & Hosting | **Next.js**, deployed on **Vercel** (free tier) |
-| **Audio Capture** | Mic Input (You) | `getUserMedia` → **`AudioWorkletNode`** for raw PCM extraction (dedicated real-time audio thread, not main thread) |
-| **Audio Capture** | Remote/System Audio | `getDisplayMedia({ audio: true })` (tab/screen share) → same `AudioWorkletNode` pipeline |
-| **STT Engine** | Participants (always) | **`whisper.cpp` compiled to WASM** (C++/`ggml`, WASM SIMD + pthreads), run synchronously in a dedicated Worker, with a watchdog that falls back to single-threaded on a stuck worker — see §4.7. |
-| **STT Engine** | Mic / "You" (preferred) | **Web Speech API** (`SpeechRecognition`) — cloud recognition via the browser vendor, fast/accurate, requires internet, Chrome/Edge-family only. Falls back to the whisper.cpp engine above when unsupported. See §4.10. |
+| **Audio Capture** | Mic Input (You) | `getUserMedia` → Web Audio `AnalyserNode` (level meter only) + `MediaRecorder` (~10s stop/restart cycles, uploaded as compressed audio files) — see §9. Superseded: originally `AudioWorkletNode` raw-PCM extraction, §3 below. |
+| **Audio Capture** | Remote/System Audio | `getDisplayMedia({ audio: true })` (tab/screen share) → same `AnalyserNode` + `MediaRecorder` pipeline |
+| **STT Engine** | Both channels | **Groq's Whisper API** (`whisper-large-v3` / `whisper-large-v3-turbo`), user-supplied key, called directly from the browser (§9). Superseded: local `whisper.cpp` WASM for Participants + Web Speech API hybrid for mic, §3-§4 below — both fully removed from the codebase. |
 | **Diarization** | Speaker Separation | None in v1 — remote audio is a single "Participants" stream (see §4). Future: WASM speaker-embedding model (ONNX-WASM-SIMD or Rust/`wasm-bindgen`), not a JS reimplementation. |
 | **Summarization** | LLM | **OpenRouter API**, user-supplied key, user-selectable model |
 | **Storage** | Meeting History | **IndexedDB** (via `idb` — thin promise wrapper, no query layer; matches the pattern used elsewhere in this codebase's sibling projects), browser-local, no backend |
@@ -37,6 +36,17 @@ It runs entirely as a static/SSR web app (hosted free on Vercel), captures meeti
 ---
 
 ## 3. Audio Pipeline Architecture
+
+> **Superseded by §9.** This section (and §4's numbered constraints list)
+> describes the app's original local-first architecture — `AudioWorkletNode`
+> PCM extraction, local `whisper.cpp` WASM, and the Web Speech API mic
+> hybrid. None of that code exists in the app anymore; both channels now go
+> through Groq's cloud API via `MediaRecorder` (§9). Kept below as the
+> historical record of real debugging work (aliasing, threading, timing
+> bugs, watchdogs) rather than deleted — several of the *lessons* still
+> apply even though the specific code doesn't (e.g. the shared-clock timing
+> fix in §4.12 is the same reason §9's `MeetingAudioCapture` still takes a
+> `meetingEpochMs`).
 
 ```
         ┌──────────────────┐              ┌───────────────────────────┐
@@ -148,25 +158,61 @@ These are real limitations of the platform, not implementation gaps — worth be
 
 ## 6. Storage & Privacy Model
 
+**Updated per §9 (Groq migration) — this section describes the current, fully-cloud-transcription state, not the original local-first design §3-§4 describe.**
+
 * Transcripts, summaries, and metadata live in IndexedDB, scoped to the browser/device. No account, no login, no server-side database.
-* The OpenRouter API key lives in `localStorage`, sent only to OpenRouter directly from the browser — never proxied through a server you operate.
+* The OpenRouter API key and the Groq API key both live in `localStorage`, each sent only directly to its own provider from the browser — never proxied through a server you operate.
 * Tradeoff of local-only history (chosen over cloud sync): no cross-device access, and browser data clears (private browsing, "clear site data", browser reinstall) wipe history. Mitigate with a prominent, easy "Export All" action rather than silently accepting the data-loss risk.
-* **Updated per §4.10: mic audio is no longer guaranteed to stay on-device.** When Web Speech API is available (Chrome/Edge, the common case), your own voice is streamed to the browser vendor's cloud recognition service (Google, in Chrome) to be transcribed — not to a server this app operates, but off-device nonetheless. Participants' audio is unaffected and always stays local via whisper.cpp, since Web Speech has no way to capture it. The in-app tagline and per-channel labels ("— cloud" / "— local") reflect this live, so it's never silently misrepresented as fully local when it isn't.
+* **Neither channel stays on-device anymore.** Both your own voice (mic) and other participants' audio (tab/system capture) are uploaded to Groq's cloud API for transcription, using your own key. This is a deliberate, explicit decision (§9) for a personal, non-distributed tool — not a default the app quietly slid into. Raw audio itself is still never written to IndexedDB (only the resulting text), and is discarded client-side immediately after each ~10s window's upload completes.
 
 ---
 
 ## 7. Legal / Consent Note
 
-This is a personal-use tool: no participant-facing consent UI is in scope (§5, Phase 5's recording indicator is a cue for you, not something the other party ever sees — and nothing in this architecture reaches their screen regardless). Recording-consent law is jurisdiction-dependent — some places are one-party consent (yours is enough), others require all parties' consent regardless of what any app displays. That's on you to handle outside the app; not something the app tracks or enforces.
+This is a personal-use tool: no participant-facing consent UI is in scope (§5, Phase 5's recording indicator is a cue for you, not something the other party ever sees — and nothing in this architecture reaches their screen regardless). Recording-consent law is jurisdiction-dependent — some places are one-party consent (yours is enough), others require all parties' consent regardless of what any app displays. That's on you to handle outside the app; not something the app tracks or enforces. The user has explicitly directed that this remains out of scope for the app itself, given personal, non-distributed use.
 
 ---
 
 ## 8. Verification & Test Suite
 
 1. **Browser Compatibility Matrix:** Confirm full dual-channel capture on Chrome/Edge; confirm graceful mic-only fallback on Safari/Firefox.
-2. **Offline Transcription Test:** Disconnect internet after the Whisper model is cached; confirm a full record → transcribe → save cycle works with zero network calls.
+2. ~~Offline Transcription Test~~ — **no longer applicable, see §9.** Both channels require live network access to Groq now, by deliberate design; there is no offline transcription path to verify.
 3. **No-Key Summarization Test:** Confirm the app functions fully (record, transcribe, save, export) with no OpenRouter key set, and summarization clearly prompts for a key instead of erroring.
 4. **Persistence Test:** Record a meeting, reload the page and restart the browser, confirm history is intact in IndexedDB.
 5. **Export/Backup Test:** Confirm "Export All" produces a complete, re-importable backup of meeting history.
 6. **Storage Quota Test:** Simulate near-quota IndexedDB usage and confirm the app warns rather than silently failing to save.
-7. **Web Speech Real-Browser Test (partially confirmed, see §4.10):** Record a meeting in Chrome with actual speech and confirm (a) mic transcript appears noticeably faster/more accurately than the whisper.cpp path, (b) the "Speech recognition isn't responding" watchdog message never appears during normal use, (c) Participants transcription is unaffected. Separately, a real user already confirmed hitting the (now-reverted) multi-threaded whisper.cpp watchdog message ("Transcription worker stopped responding") in their real browser — see §4.7 — which is why that path is single-threaded again; a clean session today should never show that message.
+7. ~~Web Speech Real-Browser Test~~ — **superseded by §9's Groq migration.** Web Speech is no longer part of the app.
+8. **Groq Real-Browser Test (see §9 for what's already verified, and what still needs a real key/real call):** record a real meeting with a valid Groq key and confirm (a) both channels produce accurate transcript text, (b) the MediaRecorder stop/restart cycle survives many consecutive windows without stalling (verified structurally with a real mic stream in §9, not yet with a real Groq response), (c) Participants sharing still degrades gracefully to mic-only if the share dialog is declined.
+
+---
+
+## 9. Migration to Groq Cloud Transcription (Personal-Use Pivot)
+
+**Decision, and why:** after the local whisper.cpp pipeline's `audio_ctx` fix (§4.16) still left transcription slow and expensive to maintain (its own Emscripten/WASM build toolchain, single-threaded inference ceiling, a growing pile of accumulated fixes — anti-aliasing, `[BLANK_AUDIO]` filtering, cross-channel timing, the pthreads saga), the user made an explicit, informed call: this is a personal, non-distributed tool used only for meeting notes/minutes/re-referencing, they're comfortable with audio leaving the device (already true for the mic channel via Web Speech, §4.10), and reliable, fast transcription matters more than local-only processing. Regulatory/consent considerations were explicitly directed out of scope by the user for this app (§7). Given that, the user chose to fully replace both the local whisper.cpp engine (Participants) and the Web Speech API (mic) with Groq's cloud Whisper API for both channels — not an incremental fix, a full architectural pivot.
+
+**Why Groq specifically:** hosted `whisper-large-v3` / `whisper-large-v3-turbo`, OpenAI-compatible REST API, the turbo model claims ~216x realtime (irrelevant local-inference-speed ceiling entirely removed), same BYOK pattern already established for OpenRouter (user's own key, sent directly from the browser, never through a server this app operates — so the "$0 operating cost to the developer" principle in §1 still holds).
+
+**What changed:**
+
+* **Capture (`src/lib/audio/capture.ts`), fully rewritten.** The `AudioWorkletNode`/raw-PCM/anti-aliasing pipeline (§3, §4.14) is gone. Level metering now comes from a Web Audio `AnalyserNode` per channel (polled every 100ms). The actual recorded audio comes from a separate `MediaRecorder` per channel, wrapping the same raw `MediaStream` directly — no resampling/anti-aliasing needed at all, since Groq's API accepts standard compressed audio (Opus/WebM, or mp4 on Safari) directly, unlike whisper.cpp which required exact 16kHz mono float32 PCM. Every ~10s (`WINDOW_MS`), each channel's recorder is stopped (flushing one complete, self-contained audio file) and restarted for the next window — MediaRecorder's periodic `dataavailable` chunks aren't independently decodable on their own; only a full stop/start cycle produces a file Groq's per-request endpoint can accept. The shared-epoch-clock pattern from §4.12 (a single `meetingEpochMs`, not per-channel "seconds since this channel started" counters) was deliberately carried over unchanged into `prime(meetingEpochMs)` — the participants-starts-later-than-mic timing bug that fix addressed is exactly as real under this new pipeline as the old one.
+
+* **Window size: 3s → 10s.** Local whisper.cpp's window was constrained by inference latency (§4.9); Groq's speed removes that constraint entirely. Larger windows were chosen deliberately for more model context per call (fewer mid-sentence chunk-boundary cuts, the unresolved problem §4.9 flagged) and smaller compressed-audio upload overhead, at the cost of the live transcript feeling slightly less "in the moment" — judged a reasonable trade for a personal note-taking tool, not a live-captioning one.
+
+* **Transcription (`src/lib/groq/client.ts`, `src/hooks/useGroqTranscription.ts`), new.** Direct multipart upload to `https://api.groq.com/openai/v1/audio/transcriptions` (`response_format: verbose_json` for per-segment timestamps), same BYOK pattern as `src/lib/openrouter/client.ts`. The `no_speech_prob`/bracket-tag filtering from the local-whisper era (§4.11) was carried over unchanged into the Groq client — Groq's whisper-large-v3 family exhibits the same style of non-speech hallucinations on silent audio. Unlike the old `WhisperEngine`, there's no single Worker/queue serializing every call — Groq requests are independent, stateless HTTP calls, so mic and Participants windows (or even overlapping windows within one channel) can be in flight concurrently; ordering in the UI comes from re-sorting segments by `start` after every insert, not from request order.
+
+* **Settings (`src/hooks/useGroqSettings.ts`, `SettingsModal.tsx`).** A Groq API key + model picker (`whisper-large-v3` vs the faster/cheaper default `whisper-large-v3-turbo`), same `localStorage` BYOK pattern as OpenRouter. Unlike OpenRouter's key (which only gates summarization), the Groq key is required for the app to do anything at all — Start meeting is disabled without one.
+
+* **Removed entirely, not just deprecated:** `wasm-build/` (Emscripten patches + build docs), `public/wasm/`, `public/workers/whisper-worker.js`, `public/worklets/pcm-processor.js` (and its dedicated anti-aliasing regression test, `scripts/verify-antialias.js`/`npm run test:dsp` — testing code for DSP logic that no longer exists would be actively misleading, not harmless dead weight), `public/models/` (local dev model cache), `src/lib/stt/{whisperEngine,modelStore,models,webSpeechTypes}.ts`, `src/hooks/{useTranscription,useWebSpeechTranscription,useSttModelSettings,useMicTranscriptionSettings}.ts`, and the `COOP`/`COEP` cross-origin isolation headers in `next.config.ts` (existed only for `SharedArrayBuffer`/multi-threaded WASM, which no longer exists in the app at all). `src/lib/stt/types.ts` (the channel-agnostic `TranscriptSegment` shape) and `format.ts` were kept — still used, unchanged.
+
+* **Offline capability dropped, deliberately.** The service worker (`public/sw.js`) no longer precaches transcription-critical assets (they don't exist anymore) — it now only caches a couple of app-shell assets for a faster repeat load. §5 Phase 5's "verified offline against a production build" milestone no longer applies and isn't being re-chased; both channels require live network access to Groq now, a deliberate, accepted trade-off for a personal tool the user will presumably always use online.
+
+**A real bug found and fixed during this migration, not merely a design choice:** the naive implementation — calling `new MediaRecorder(stream).start()` synchronously inside the *previous* recorder's `onstop` handler to start the next window — throws `NotSupportedError` in Chrome. Confirmed via direct testing (a Playwright harness driving the real app with Chrome's fake-audio-capture device): window 1 always succeeds, but every subsequent restart on the same stream fails immediately, with no self-recovery even across delayed retries. **Root-caused before shipping:** this turned out to be specific to Chrome's synthetic fake-audio-device test harness (likely a single-consumer limitation of that test device) — the identical restart cycle was verified durable across 4+ consecutive real windows (~160KB each) using a real microphone stream in real Chrome, with zero errors. Two things were still kept from the investigation, on defense-in-depth grounds rather than because the root cause turned out to be real-world-relevant: (a) the restart is deferred one task (`setTimeout(..., 0)`) rather than called synchronously in `onstop`, removing any theoretical risk of racing MediaRecorder's own teardown of the previous instance; (b) `recorder.start()` failures get bounded retries (3, with a 250ms gap) before surfacing a visible error via a new `onError` callback threaded through `useMeetingRecorder.ts`, rather than a channel's capture loop silently going quiet forever — the same "cheap insurance, bounded retries, then a real visible error" pattern this project has used before (e.g. the whisper watchdog's `MAX_AUTO_RESTARTS`, §4.7).
+
+**Verified (Playwright, real mic stream, real Chrome, no real Groq key available in this environment):**
+* Start meeting is disabled with no Groq key, enabled once one is set.
+* A real getUserMedia mic stream, fed through the new `MediaRecorder` pipeline, produces correctly-sized, non-empty audio files (~160KB per ~10s window) across at least 4 consecutive stop/restart cycles with zero failures.
+* An intentionally invalid Groq key (same verification technique this project used for OpenRouter in §5 Phase 3) produces a clean 401, surfaced as a visible error banner, not a crash.
+* "New meeting" correctly resets back to the ready state.
+* `tsc --noEmit` and `eslint` both clean after the full rewrite and file removals; no stray references to any deleted module remain (verified by grep, not just by the type-checker passing).
+
+**Not yet verified — needs a real Groq key and a real meeting:** actual transcription accuracy/quality from Groq (this environment has no real key to test against); Participants-channel behavior specifically (macOS's Screen Recording permission blocked automated `getDisplayMedia` testing in this environment too, same limitation encountered during the earlier local-whisper work — see the removed `wasm-build/README.md`'s benchmark history for the prior occurrence); whether 10s windows feel appropriately "live" in practice, or whether that should be tuned shorter/longer after real use.

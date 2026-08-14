@@ -12,8 +12,6 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // Vendored Emscripten build output (whisper.cpp -> WASM), not our source.
-    "public/wasm/**",
   ]),
 ]);
 

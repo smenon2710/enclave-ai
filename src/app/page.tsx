@@ -1,18 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMeetingRecorder, type ChannelStats } from "@/hooks/useMeetingRecorder";
-import { useTranscription } from "@/hooks/useTranscription";
-import { useWebSpeechTranscription, useMicEngine } from "@/hooks/useWebSpeechTranscription";
+import { useGroqTranscription } from "@/hooks/useGroqTranscription";
+import { useGroqSettings } from "@/hooks/useGroqSettings";
 import { useOpenRouterSettings } from "@/hooks/useOpenRouterSettings";
 import { useSummary } from "@/hooks/useSummary";
 import { useMeetingChat } from "@/hooks/useMeetingChat";
 import { useMeetingHistory } from "@/hooks/useMeetingHistory";
 import { useMicrophoneDevice } from "@/hooks/useMicrophoneDevice";
-import { useSttModelSettings } from "@/hooks/useSttModelSettings";
-import { useForceLocalMic } from "@/hooks/useMicTranscriptionSettings";
-import { getWhisperModelUrl } from "@/lib/stt/models";
-import type { PCMChunk } from "@/lib/audio/types";
+import type { AudioWindow } from "@/lib/audio/types";
 import { SettingsModal } from "@/components/SettingsModal";
 import { HistoryModal } from "@/components/HistoryModal";
 import { MeetingChat } from "@/components/MeetingChat";
@@ -46,55 +43,15 @@ function LevelMeter({ label, active, stats }: { label: string; active: boolean; 
         />
       </div>
       <div className="text-xs text-zinc-500 dark:text-zinc-400">
-        {stats.chunkCount} chunks · {stats.sampleCount.toLocaleString()} samples @16kHz
+        {stats.windowsSent} window{stats.windowsSent === 1 ? "" : "s"} sent to Groq
       </div>
-    </div>
-  );
-}
-
-function ModelStatusBanner({
-  status,
-  progress,
-  errorMessage,
-}: {
-  status: ReturnType<typeof useTranscription>["modelStatus"];
-  progress: ReturnType<typeof useTranscription>["downloadProgress"];
-  errorMessage: string | null;
-}) {
-  if (status === "ready") return null;
-
-  if (status === "error") {
-    return (
-      <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-        Local (Participants) transcription model failed to load{errorMessage ? `: ${errorMessage}` : "."}
-      </div>
-    );
-  }
-
-  const percent =
-    progress?.totalBytes && progress.totalBytes > 0
-      ? Math.round((progress.loadedBytes / progress.totalBytes) * 100)
-      : null;
-
-  return (
-    <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
-      {status === "downloading"
-        ? `Downloading local transcription model (for Participants)${percent !== null ? ` (${percent}%)` : "…"}`
-        : status === "initializing"
-          ? "Initializing whisper.cpp (WASM)…"
-          : "Loading local transcription model…"}
     </div>
   );
 }
 
 export default function Home() {
-  const sttModel = useSttModelSettings();
-  // The env override exists for local dev convenience (point at a local
-  // model file instead of re-downloading from Hugging Face every reload)
-  // and takes priority over the Settings picker.
-  const modelUrl = process.env.NEXT_PUBLIC_WHISPER_MODEL_URL ?? getWhisperModelUrl(sttModel.modelId);
-  const transcription = useTranscription(modelUrl);
-  const webSpeech = useWebSpeechTranscription();
+  const groqSettings = useGroqSettings();
+  const transcription = useGroqTranscription(groqSettings.apiKey, groqSettings.model);
   const openRouter = useOpenRouterSettings();
   const summary = useSummary();
   const chat = useMeetingChat();
@@ -108,50 +65,30 @@ export default function Home() {
   const { deviceId: micDeviceId, devices: micDevices, setDeviceId: setMicDeviceId, refreshDevices } =
     useMicrophoneDevice();
 
-  // "cloud" (Web Speech API — fast, but your voice is sent to the browser
-  // vendor's recognition service) when available, else "local" (whisper.cpp,
-  // same engine as Participants). The Settings toggle below can force
-  // "local" even when the cloud path is available — Web Speech has no way
-  // to accept a deviceId or MediaStream, so it silently ignores the
-  // microphone picker above and always captures whatever it resolves
-  // internally as "the" mic; whisper.cpp's getUserMedia path does respect it.
-  const forceLocalMic = useForceLocalMic();
-  const detectedMicEngine = useMicEngine();
-  const micEngine = forceLocalMic.forceLocal ? "local" : detectedMicEngine;
-
-  const handlePCMChunk = useCallback(
-    (chunk: PCMChunk) => {
-      // Mic audio only goes to whisper when Web Speech isn't handling it —
-      // otherwise Web Speech handles mic transcription and whisper only
-      // processes Participants (which Web Speech can't capture at all, see
-      // useWebSpeechTranscription.ts).
-      if (chunk.channel === "participants" || micEngine === "local") {
-        transcription.pushChunk(chunk);
-      }
+  const handleAudioWindow = useCallback(
+    (window: AudioWindow) => {
+      transcription.pushWindow(window);
     },
-    [transcription, micEngine]
+    [transcription]
   );
 
-  const { state, startMeeting, stopMeeting, resetToIdle } = useMeetingRecorder(handlePCMChunk);
+  const { state, startMeeting, stopMeeting, resetToIdle } = useMeetingRecorder(handleAudioWindow);
   const isRecording = state.status === "recording";
   const isBusy = state.status === "requesting-mic" || state.status === "requesting-participants";
-  // WhisperEngine serializes transcribe() calls through one queue — if live
-  // transcription falls behind real-time during a long/busy call, a backlog
-  // can still be draining after Stop is clicked (flushAll just adds two more
-  // jobs to the end of it). Summary/Ask should wait for it, not run against
-  // a transcript that's still missing its last stretch. Scoped to "stopped"
-  // only — pendingJobCount is also nonzero continuously *during* normal live
-  // recording (a window is always in flight), where "finalizing" would be a
-  // misleading label and there's no reason to block Summary/Ask anyway.
-  const isFinalizingTranscript = state.status === "stopped" && transcription.pendingJobCount > 0;
-  // Surfaces exactly how long finalizing actually takes (a real user
-  // reported it feeling slow, with no way to tell how slow) — ticks while
-  // isFinalizingTranscript is true, resets once it clears.
-  // Reset to 0 happens in handleStop (a real event handler, not here) — this
-  // project's lint rules (React Compiler purity) forbid both reading Date.now()
-  // during render and calling setState synchronously in an effect body, so
-  // this effect only manages the ticking interval once finalizing is
-  // already known to be underway.
+  // Groq requests are independent per ~10s window (see capture.ts) rather
+  // than serialized through one blocking local engine, so this should
+  // normally clear within a few seconds of Stop — but the very last window
+  // is still delivered asynchronously (capture.ts's onstop fires after
+  // stopMeeting() has already resolved), so Summary/Ask still need to wait
+  // for it rather than assume the transcript is complete the instant
+  // recording stops.
+  const isFinalizingTranscript = state.status === "stopped" && transcription.pendingRequestCount > 0;
+  // Surfaces exactly how long finalizing actually takes. Reset to 0 happens
+  // in handleStop (a real event handler, not here) — this project's lint
+  // rules (React Compiler purity) forbid both reading Date.now() during
+  // render and calling setState synchronously in an effect body, so this
+  // effect only manages the ticking interval once finalizing is already
+  // known to be underway.
   const [finalizingElapsedSeconds, setFinalizingElapsedSeconds] = useState(0);
   useEffect(() => {
     if (!isFinalizingTranscript) return;
@@ -166,24 +103,16 @@ export default function Home() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  // Merges the two independent transcription sources into one chronological
-  // transcript for display, History, Summary, and Ask — mic segments come
-  // from whichever of Web Speech/whisper is actually handling that channel
-  // this session (see micEngine above); Participants always comes from
-  // whisper, since Web Speech has no way to listen to that stream at all.
-  const allSegments = useMemo(
-    () => [...transcription.segments, ...webSpeech.segments].sort((a, b) => a.start - b.start),
-    [transcription.segments, webSpeech.segments]
-  );
+  const allSegments = transcription.segments;
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "end" });
   }, [allSegments.length]);
 
   // Upserts the current meeting into history whenever it changes after
-  // stopping — covers late-arriving segments from flushAll's final window
-  // and a summary generated afterward, without needing to track exactly
-  // when async transcription/summarization settle.
+  // stopping — covers late-arriving segments from the final window and a
+  // summary generated afterward, without needing to track exactly when
+  // async transcription/summarization settle.
   useEffect(() => {
     if (state.status !== "stopped") return;
     if (!currentMeetingRef.current) return;
@@ -210,23 +139,15 @@ export default function Home() {
   const handleStart = async () => {
     currentMeetingRef.current = { id: crypto.randomUUID(), startedAt: Date.now() };
     transcription.reset();
-    webSpeech.reset();
     summary.reset();
     chat.reset();
-    const meetingEpochMs = await startMeeting(micDeviceId || undefined);
-    // null means mic capture itself failed (see useMeetingRecorder) — don't
-    // start cloud speech recognition against a meeting that never began, and
-    // don't pass along a missing epoch that would make its timestamps drift
-    // from whisper's.
-    if (meetingEpochMs !== null && micEngine === "cloud") webSpeech.start(meetingEpochMs);
+    await startMeeting(micDeviceId || undefined);
     refreshDevices(); // labels are blank pre-permission; populate now that it's granted
   };
 
   const handleStop = async () => {
     setFinalizingElapsedSeconds(0);
     await stopMeeting();
-    transcription.flushAll();
-    webSpeech.stop();
   };
 
   // Clears a finished meeting's transcript/summary/chat back to a blank
@@ -236,7 +157,6 @@ export default function Home() {
   const handleNewMeeting = () => {
     currentMeetingRef.current = null;
     transcription.reset();
-    webSpeech.reset();
     summary.reset();
     chat.reset();
     resetToIdle();
@@ -254,9 +174,8 @@ export default function Home() {
   // so it doesn't leave an empty gapped div when nothing needs showing. Each
   // banner below still applies its own (more specific) condition.
   const hasBanners =
-    transcription.modelStatus !== "ready" ||
+    !groqSettings.hasApiKey ||
     !!transcription.errorMessage ||
-    !!webSpeech.errorMessage ||
     !state.participantsSupported ||
     (state.status === "error" && !!state.errorMessage);
 
@@ -269,9 +188,9 @@ export default function Home() {
               Enclave AI
             </h1>
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              {micEngine === "cloud"
-                ? "Your voice is transcribed via your browser's cloud speech service (fast, but sent off-device). Participants' audio stays fully local via on-device Whisper."
-                : "Runs entirely in this browser — audio, transcription, and history never leave your device."}
+              Both your voice and Participants&apos; audio are transcribed via Groq&apos;s cloud
+              API using your own key — audio leaves this device for transcription. History and
+              your keys still never touch a server we control.
             </p>
           </div>
           <div className="flex shrink-0 gap-2">
@@ -294,21 +213,16 @@ export default function Home() {
 
         {hasBanners && (
           <div className="flex flex-col gap-2">
-            <ModelStatusBanner
-              status={transcription.modelStatus}
-              progress={transcription.downloadProgress}
-              errorMessage={transcription.errorMessage}
-            />
-
-            {transcription.modelStatus !== "error" && transcription.errorMessage && (
+            {!groqSettings.hasApiKey && (
               <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                {transcription.errorMessage}
+                Add your Groq API key in Settings to enable transcription — required for both mic
+                and Participants audio.
               </div>
             )}
 
-            {webSpeech.errorMessage && (
+            {transcription.errorMessage && (
               <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                {webSpeech.errorMessage}
+                {transcription.errorMessage}
               </div>
             )}
 
@@ -346,7 +260,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => void handleStart()}
-                disabled={isBusy || transcription.modelStatus !== "ready"}
+                disabled={isBusy || !groqSettings.hasApiKey}
                 className="rounded-full bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
               >
                 {state.status === "requesting-mic"
@@ -407,13 +321,9 @@ export default function Home() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <LevelMeter label="You (mic) — Groq" active={isRecording} stats={state.mic} />
             <LevelMeter
-              label={`You (mic) — ${micEngine === "cloud" ? "cloud" : "local"}`}
-              active={isRecording}
-              stats={state.mic}
-            />
-            <LevelMeter
-              label="Participants (tab/system) — local"
+              label="Participants (tab/system) — Groq"
               active={isRecording && state.participantsActive}
               stats={state.participants}
             />
@@ -432,9 +342,11 @@ export default function Home() {
               )}
             </div>
             <div className="h-[24rem] overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950 lg:h-[32rem]">
-              {allSegments.length === 0 && !webSpeech.interimText ? (
+              {allSegments.length === 0 ? (
                 <p className="text-sm text-zinc-400">
-                  {isRecording ? "Listening…" : "Start a meeting to see a live transcript."}
+                  {isRecording
+                    ? "Listening… each ~10s window appears here once Groq transcribes it."
+                    : "Start a meeting to see a live transcript."}
                 </p>
               ) : (
                 <div className="flex flex-col gap-2">
@@ -455,15 +367,6 @@ export default function Home() {
                       <span className="text-zinc-800 dark:text-zinc-200">{segment.text}</span>
                     </div>
                   ))}
-                  {webSpeech.interimText && (
-                    <div className="text-sm italic text-zinc-400">
-                      <span className="mr-2 font-mono text-xs text-zinc-400">…</span>
-                      <span className="font-medium text-emerald-700/70 dark:text-emerald-400/70">
-                        You:{" "}
-                      </span>
-                      {webSpeech.interimText}
-                    </div>
-                  )}
                   <div ref={transcriptEndRef} />
                 </div>
               )}
@@ -473,7 +376,7 @@ export default function Home() {
           <div className="flex flex-col gap-6 lg:sticky lg:top-6">
             {isFinalizingTranscript && (
               <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
-                Finalizing transcript — still processing the last bit of local audio (
+                Finalizing transcript — waiting on the last audio window(s) still processing (
                 {finalizingElapsedSeconds}s and counting). Summary and Ask are disabled until this
                 settles so they don&apos;t run against a partial transcript.
               </div>
@@ -544,10 +447,10 @@ export default function Home() {
           model={openRouter.model}
           onApiKeyChange={openRouter.setApiKey}
           onModelChange={openRouter.setModel}
-          sttModelId={sttModel.modelId}
-          onSttModelChange={sttModel.setModelId}
-          forceLocalMic={forceLocalMic.forceLocal}
-          onForceLocalMicChange={forceLocalMic.setForceLocal}
+          groqApiKey={groqSettings.apiKey}
+          groqModel={groqSettings.model}
+          onGroqApiKeyChange={groqSettings.setApiKey}
+          onGroqModelChange={groqSettings.setModel}
         />
       )}
 

@@ -1,20 +1,11 @@
 import type { NextConfig } from "next";
 
-// Cross-origin isolation, required for SharedArrayBuffer so whisper.cpp's
-// WASM build can run multi-threaded (Phase 2). Without these headers it
-// still works, just single-threaded.
-const nextConfig: NextConfig = {
-  async headers() {
-    return [
-      {
-        source: "/:path*",
-        headers: [
-          { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
-          { key: "Cross-Origin-Embedder-Policy", value: "require-corp" },
-        ],
-      },
-    ];
-  },
-};
+// No special headers needed anymore — the COOP/COEP cross-origin isolation
+// headers here previously existed for SharedArrayBuffer (multi-threaded
+// whisper.cpp WASM). That entire local-transcription pipeline was removed
+// when this app moved to Groq's cloud API for both mic and Participants
+// audio (see plan.md's migration note) — nothing in the app needs
+// SharedArrayBuffer anymore.
+const nextConfig: NextConfig = {};
 
 export default nextConfig;

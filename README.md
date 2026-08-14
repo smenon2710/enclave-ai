@@ -1,34 +1,39 @@
 # Enclave AI
 
-Browser-based meeting assistant. No install, no server-side audio or LLM
-processing — see `plan.md` for the full architecture.
+Browser-based meeting assistant. No install, no server-side app logic — see
+`plan.md` for the full architecture.
 
-**Transcription is hybrid, not fully local** (see plan.md §4.10): your own
-voice goes through the browser's cloud speech service when available (fast,
-accurate, but that audio leaves the device — Web Speech API, e.g. Google's
-recognition backend in Chrome), falling back to on-device whisper.cpp WASM
-otherwise. Participants' audio always stays on-device via whisper.cpp — Web
-Speech has no way to capture anything but the microphone. The in-app UI
-labels each channel "— cloud" / "— local" live so this is never hidden.
+**Transcription is fully cloud-based, not local** (see plan.md's migration
+note near the end): both your own voice and other participants' audio are
+transcribed via Groq's Whisper API, using your own API key sent directly
+from the browser to Groq — never through a server this app operates. This
+supersedes the project's original design, which kept Participants audio
+strictly on-device via local whisper.cpp WASM and used a mic-only hybrid
+(Web Speech API) for your own voice. That local pipeline is fully removed
+from the codebase now — see plan.md for why, and for the substantial
+benchmarking/debugging history of the pipeline it replaced (kept as
+historical record, not because any of that code still runs).
 
 ## Status
 
-**Phase 1 (capture pipeline):** done. Mic (`getUserMedia`) and participants
-(`getDisplayMedia` tab/system audio) capture, piped through an
-`AudioWorkletNode` and resampled to 16kHz mono PCM in-memory.
+**Phase 1 (capture pipeline):** done, rewritten from the original
+AudioWorklet/PCM pipeline to `MediaRecorder`. Mic (`getUserMedia`) and
+Participants (`getDisplayMedia` tab/system audio) capture; a live level
+meter comes from a Web Audio `AnalyserNode` on each stream, while a
+separate `MediaRecorder` per channel captures the actual audio in ~10s
+stop/restart cycles (`src/lib/audio/capture.ts`) — each completed window is
+a self-contained compressed file (Opus/WebM, or mp4 on Safari) uploaded
+directly for transcription. No client-side resampling/anti-aliasing needed
+anymore — Groq's API accepts standard compressed audio formats directly,
+unlike the local whisper.cpp engine this replaced, which required exact
+16kHz mono float32 PCM.
 
-**Phase 2 (client-side transcription):** done, single-threaded — see
-plan.md §4.7. `whisper.cpp` compiled to WASM (`public/wasm/whisper/`, build
-instructions in `wasm-build/`) runs in a dedicated Worker
-(`public/workers/whisper-worker.js`), transcribing the Participants channel
-locally (the mic channel now prefers the cloud Web Speech API — see below).
-Model weights fetch from Hugging Face on first use and cache in IndexedDB.
-Multi-threading was tried after real-user latency feedback, and reverted
-after a real user confirmed it hangs in their actual browser too, not just
-this project's sandboxed test environment — see `wasm-build/README.md` for
-the full history. A watchdog in `WhisperEngine.transcribe()` stays in place
-as general-purpose defense against any stuck worker (not a pthreads-specific
-one anymore), capped at 2 auto-restarts before surfacing a persistent error.
+**Phase 2 (transcription):** done — Groq's Whisper API (`whisper-large-v3`,
+or the faster/cheaper `whisper-large-v3-turbo` default, your choice in
+Settings) transcribes both channels directly from the browser using your
+own API key. Fully replaces this project's original local-only whisper.cpp
+WASM pipeline (its own Emscripten build toolchain, single-threaded, ~3s
+windows) and the Web Speech API mic hybrid that followed it.
 
 **Phase 3 (OpenRouter summarization):** done. Settings modal for your own
 OpenRouter API key + model (stored in `localStorage`, sent straight to
@@ -48,15 +53,16 @@ storage, only text. A quota warning shows if browser storage crosses 80%.
 to Start/Stop. Installable as a PWA (`public/manifest.json`) with a
 hand-rolled service worker (`public/sw.js`) — no `next-pwa`/Workbox, since
 those assume webpack build hooks that don't line up cleanly with Next.js
-16's Turbopack build. **Verified offline against a production build**
-(`next build && next start` — dev mode's chunk hashes aren't stable enough
-to cache meaningfully): load once online, then go fully offline — the app
-still loads, the model loads from its IndexedDB cache, and a full
-record → transcribe cycle works with zero network calls. Responsive pass
-done at a 375px viewport, including a real overflow bug found and fixed in
-the History modal's toolbar.
+16's Turbopack build. The service worker now only caches the app shell for
+a faster repeat load — **no longer offline-capable for transcription**
+(previously verified fully offline end-to-end under the local whisper.cpp
+pipeline; both channels now require live network access to Groq, by design,
+per the migration above). Responsive pass done at a 375px viewport,
+including a real overflow bug found and fixed in the History modal's
+toolbar.
 
-All five roadmap phases are now built and verified end-to-end.
+All five roadmap phases are built and verified end-to-end, most recently
+against the current Groq-based transcription pipeline.
 
 **Post-launch fixes & additions (from real-device testing feedback):**
 - **Delete history**: "Delete all" in the History panel, alongside the existing per-meeting delete.
@@ -73,7 +79,8 @@ All five roadmap phases are now built and verified end-to-end.
 - **Fixed a real Participants transcription accuracy bug — missing anti-aliasing filter** — a user reported garbled text specifically for other call participants despite the audio itself sounding fine on playback. The PCM downsampler (`public/worklets/pcm-processor.js`) was decimating from the device's native rate (commonly 48kHz) down to whisper's 16kHz via linear interpolation only, with no low-pass filter first — so real energy above 16kHz's Nyquist frequency was aliasing into the speech band during downsampling, corrupting exactly what whisper actually transcribes from, invisibly to a human listening to the unfiltered original. Fixed with a proper two-stage low-pass filter before decimation. Also tried, then reverted before shipping: switching the default transcription model from tiny.en to base.en for better accuracy — a direct timing probe showed base.en can take longer than the 25s watchdog timeout per window, which would silently produce *less* transcript, not more, via repeated restart cycles. See plan.md §4.14.
 - **"New meeting" button + wider, two-column layout** — after Stop, a "New meeting" button clears the transcript/summary/chat back to a blank ready screen without re-prompting for mic/participants permissions (separate from clicking Start, which still resets the same state as a side effect of immediately starting the next recording). The page layout was also widened (`max-w-6xl`, up from a narrow single `max-w-xl` column) with the live session controls (mic picker, Start/Stop/New meeting, level meters) grouped into one panel, and Transcript/Summary/Ask arranged as a wide transcript pane with a sticky Summary+Ask sidebar on large screens — falling back to the original single-column stack (verified against the same 375px viewport as Phase 5) on small ones.
 - **Short mic utterances vanishing + microphone picker gap** — a real two-party test (a podcast video shared as Participants, own voice via mic) surfaced two mic issues. First: Chrome periodically ends a Web Speech recognition "turn" even in `continuous: true` mode, and any text still sitting as interim (not yet `isFinal`) at that exact moment was silently discarded with zero trace — brief interjections like "OK" never appeared in the transcript at all; now salvaged as a best-effort final segment before restarting. Second, discovered along the way: the Web Speech API has no way to accept a `deviceId` or `MediaStream`, so it silently ignores this app's own microphone picker regardless of what's selected there — added a Settings toggle ("Always transcribe my voice locally too") to force the mic through whisper.cpp instead, which does respect the picker. Also added a live "Finalizing transcript… (Ns and counting)" counter so backlog duration is actually measurable instead of just feeling slow.
-- **Local transcription finalize time cut roughly 5-10x — missing `audio_ctx` cap** — a real user reported a 5m26s recording taking over an hour to finalize. Root cause: the WASM binding never set `whisper_full_params.audio_ctx`, so every ~3s window's encoder pass processed the model's full ~30s default context regardless of actual audio length — up to ~10x more encoder compute than necessary per window. Fixed by exposing `audio_ctx` as a JS-controlled parameter (`useTranscription.ts`) rather than hardcoding a value into the WASM binary, and benchmarking candidates directly against the real build (a Worker fed real speech audio, bypassing `getUserMedia`/`getDisplayMedia` entirely) rather than guessing: 384 was chosen after a more aggressive, proportionally-computed value (182) produced duplicated/hallucinated repeated text on some windows in *every* test run — a worse failure mode than slowness, since it isn't caught by the app's existing no-speech/bracket-tag filters. Verified end-to-end through the real app: a 14s two-channel local-transcription test that would previously have cost roughly 55s per channel now finalizes in ~13s total. Full benchmark writeup in `wasm-build/README.md`.
+- **Local transcription finalize time cut roughly 5-10x — missing `audio_ctx` cap** — a real user reported a 5m26s recording taking over an hour to finalize. Root cause: the WASM binding never set `whisper_full_params.audio_ctx`, so every ~3s window's encoder pass processed the model's full ~30s default context regardless of actual audio length — up to ~10x more encoder compute than necessary per window. Fixed by exposing `audio_ctx` as a JS-controlled parameter rather than hardcoding a value into the WASM binary, and benchmarking candidates directly against the real build (a Worker fed real speech audio, bypassing `getUserMedia`/`getDisplayMedia` entirely) rather than guessing: 384 was chosen after a more aggressive, proportionally-computed value (182) produced duplicated/hallucinated repeated text on some windows in *every* test run — a worse failure mode than slowness, since it isn't caught by the app's existing no-speech/bracket-tag filters. Verified end-to-end through the real app: a 14s two-channel local-transcription test that would previously have cost roughly 55s per channel now finalizes in ~13s total. **Superseded by the Groq migration below** — kept here as historical record of the debugging work, not because any of this WASM pipeline still runs.
+- **Migrated both transcription channels to Groq's cloud Whisper API, fully replacing local whisper.cpp and Web Speech** — an explicit, informed decision for this personal, non-distributed tool: the user confirmed they're comfortable with audio leaving the device (already true for the mic channel via Web Speech since plan.md §4.10) and that reliable, fast transcription matters more than local-only processing. This resolves multiple problems the local pipeline could only ever partially fix: the `audio_ctx` tuning above, the whole Emscripten/WASM build toolchain and its maintenance burden, the Web Speech mic-picker gap (plan.md, "Short mic utterances" entry above), and the fundamental single-threaded local inference speed ceiling. Capture moved from a custom `AudioWorklet`/PCM/anti-aliasing pipeline to the browser's `MediaRecorder` API (~10s stop/restart cycles per channel, uploaded as compressed audio files) — Groq's API doesn't need the exact-16kHz-PCM input whisper.cpp did, so that entire DSP layer (and its dedicated regression test) was removed, not just the model. Real trade-off, accepted deliberately: the app is no longer offline-capable, and every meeting now costs a small amount of Groq usage (turbo model: ~$0.04/hour of audio). See plan.md's migration note for the full reasoning and verification.
 
 ## Getting Started
 
@@ -81,24 +88,15 @@ All five roadmap phases are now built and verified end-to-end.
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Click "Start meeting":
-it'll ask for microphone access, then prompt you to share a tab/screen with
-audio for the "participants" channel (Chrome/Edge only — see `plan.md` §4
-for why). Once the transcription model finishes downloading, a live
-transcript appears for both channels.
+Open [http://localhost:3000](http://localhost:3000), add your [Groq API
+key](https://console.groq.com/keys) in Settings (required — both channels
+need it), then click "Start meeting": it'll ask for microphone access, then
+prompt you to share a tab/screen with audio for the "Participants" channel
+(Chrome/Edge only — see `plan.md` §4 for why). Each ~10s window of audio is
+uploaded to Groq and appears in the transcript once it comes back.
 
-Cross-origin isolation headers (`COOP`/`COEP`) are configured in
-`next.config.ts`. Not currently load-bearing — the shipped WASM build is
-single-threaded (see `wasm-build/README.md` for why) — left in place in
-case multi-threading gets revisited with real investigation behind it.
+An OpenRouter key (Settings) is optional and only needed for Summary/Ask.
 
-To point at a local model file instead of fetching from Hugging Face every
-reload during development, set `NEXT_PUBLIC_WHISPER_MODEL_URL` in
-`.env.local`. Note this overrides the in-app model picker entirely (it takes
-priority over whatever's selected in Settings) — don't leave it set if
-you're testing the tiny.en/base.en switcher.
-
-To test offline/PWA behavior, use a production build (`npm run build && npm
-run start`) — `npm run dev`'s Turbopack HMR chunk names change between
-requests, so the service worker can't cache them meaningfully and offline
-mode will appear broken in dev even though it works in production.
+This app requires a live internet connection to transcribe at all — there
+is no offline/local fallback (a deliberate trade-off, see the migration
+note in plan.md).
