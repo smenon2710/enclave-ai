@@ -2,7 +2,7 @@
   "name": "Enclave AI",
   "short_name": "Enclave AI",
   "description": "Browser-based meeting assistant — transcribes via your own Groq API key.",
-  "start_url": "/",
+  "start_url": "/app",
   "display": "standalone",
   "background_color": "#0b0d10",
   "theme_color": "#0b0d10",

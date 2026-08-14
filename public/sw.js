@@ -17,8 +17,8 @@
 // Cross-origin requests (Groq, OpenRouter) are explicitly left untouched —
 // those responses must always be live.
 
-const CACHE_NAME = "enclave-ai-v2";
-const PRECACHE_URLS = ["/", "/manifest.json"];
+const CACHE_NAME = "enclave-ai-v3";
+const PRECACHE_URLS = ["/", "/app", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

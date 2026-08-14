@@ -64,3 +64,32 @@ body {
 .font-mono {
   font-variant-numeric: tabular-nums;
 }
+
+/* Ambient idle animation for the landing page's hero meter (a decorative
+   preview of the real, functional level meter in src/app/app/page.tsx) —
+   suggests an instrument at rest, not live data. Each bar gets its own
+   delay/duration inline (see page.tsx) so they don't move in unison. */
+@keyframes meter-idle {
+  0%,
+  100% {
+    transform: scaleY(0.18);
+    opacity: 0.3;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
+  }
+}
+.meter-bar {
+  animation-name: meter-idle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  transform-origin: bottom;
+}
+@media (prefers-reduced-motion: reduce) {
+  .meter-bar {
+    animation: none;
+    transform: scaleY(0.5);
+    opacity: 0.55;
+  }
+}
