@@ -26,25 +26,62 @@ function formatTimestamp(totalSeconds: number): string {
   return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 }
 
+const METER_TICKS = 28;
+
 function LevelMeter({ label, active, stats }: { label: string; active: boolean; stats: ChannelStats }) {
   const widthPercent = Math.min(100, Math.round(stats.level * 400));
+  const litTicks = active ? Math.round((widthPercent / 100) * METER_TICKS) : 0;
+
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-black/10 p-4 dark:border-white/10">
-      <div className="flex items-center justify-between text-sm font-medium">
-        <span>{label}</span>
-        <span className={active ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400"}>
-          {active ? "live" : "inactive"}
+    <div className="flex flex-col gap-3 border border-hairline bg-panel p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+          {label}
         </span>
-      </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
-        <div
-          className="h-full rounded-full bg-emerald-500 transition-[width] duration-100"
-          style={{ width: `${active ? widthPercent : 0}%` }}
+        <span
+          aria-hidden
+          className={`h-1.5 w-1.5 rounded-full ${active ? "bg-signal-cyan" : "bg-hairline"}`}
         />
       </div>
-      <div className="text-xs text-zinc-500 dark:text-zinc-400">
-        {stats.windowsSent} window{stats.windowsSent === 1 ? "" : "s"} sent to Groq
+      <div className="flex items-center gap-3">
+        <div className="flex h-4 flex-1 gap-[2px]">
+          {Array.from({ length: METER_TICKS }).map((_, i) => (
+            <div
+              key={i}
+              className={`flex-1 transition-colors duration-100 ${
+                i < litTicks ? "bg-signal-cyan" : "bg-panel-raised"
+              }`}
+            />
+          ))}
+        </div>
+        <span className="w-7 shrink-0 text-right font-mono text-xs text-muted">
+          {active ? widthPercent : 0}
+        </span>
       </div>
+      <div className="font-mono text-[11px] text-muted">
+        {stats.windowsSent.toString().padStart(2, "0")} window{stats.windowsSent === 1 ? "" : "s"} sent to
+        Groq
+      </div>
+    </div>
+  );
+}
+
+function Banner({
+  tone,
+  children,
+}: {
+  tone: "amber" | "red" | "cyan";
+  children: React.ReactNode;
+}) {
+  const toneClass =
+    tone === "red"
+      ? "border-l-signal-red"
+      : tone === "cyan"
+        ? "border-l-signal-cyan"
+        : "border-l-signal-amber";
+  return (
+    <div className={`border border-hairline border-l-2 ${toneClass} bg-panel p-3 text-sm text-foreground/90`}>
+      {children}
     </div>
   );
 }
@@ -180,63 +217,62 @@ export default function Home() {
     (state.status === "error" && !!state.errorMessage);
 
   return (
-    <div className="flex flex-1 flex-col items-center bg-zinc-50 px-4 font-sans dark:bg-black sm:px-6">
-      <main className="flex w-full max-w-6xl flex-col gap-6 py-8 sm:py-12">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
+    <div className="flex flex-1 flex-col bg-background font-sans">
+      <header className="sticky top-0 z-10 w-full border-b border-hairline bg-panel/95 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+          <div className="flex items-center gap-4">
+            <h1 className="text-[13px] font-semibold uppercase tracking-[0.16em] text-foreground">
               Enclave AI
             </h1>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              Both your voice and Participants&apos; audio are transcribed via Groq&apos;s cloud
-              API using your own key — audio leaves this device for transcription. History and
-              your keys still never touch a server we control.
-            </p>
+            {isRecording ? (
+              <span className="flex items-center gap-1.5 font-mono text-xs text-signal-amber">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-signal-amber" />
+                REC {formatElapsed(state.elapsedSeconds)}
+              </span>
+            ) : state.status === "stopped" ? (
+              <span className="font-mono text-xs text-muted">{formatElapsed(state.elapsedSeconds)}</span>
+            ) : null}
           </div>
-          <div className="flex shrink-0 gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
               onClick={() => setIsHistoryOpen(true)}
-              className="rounded-full border border-black/10 px-3 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+              className="border border-hairline px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-foreground/30 hover:text-foreground"
             >
               History
             </button>
             <button
               type="button"
               onClick={() => setIsSettingsOpen(true)}
-              className="rounded-full border border-black/10 px-3 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+              className="border border-hairline px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-foreground/30 hover:text-foreground"
             >
               Settings
             </button>
           </div>
         </div>
+      </header>
 
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8">
         {hasBanners && (
           <div className="flex flex-col gap-2">
             {!groqSettings.hasApiKey && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              <Banner tone="amber">
                 Add your Groq API key in Settings to enable transcription — required for both mic
                 and Participants audio.
-              </div>
+              </Banner>
             )}
 
-            {transcription.errorMessage && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                {transcription.errorMessage}
-              </div>
-            )}
+            {transcription.errorMessage && <Banner tone="amber">{transcription.errorMessage}</Banner>}
 
             {!state.participantsSupported && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              <Banner tone="amber">
                 This browser doesn&apos;t support tab/system audio sharing — you&apos;ll only be
                 able to capture your microphone. Use Chrome or Edge for full dual-channel capture.
-              </div>
+              </Banner>
             )}
 
             {state.status === "error" && state.errorMessage && (
-              <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-                {state.errorMessage}
-              </div>
+              <Banner tone="red">{state.errorMessage}</Banner>
             )}
           </div>
         )}
@@ -245,13 +281,14 @@ export default function Home() {
             live level meters live together in one panel so the "control the
             live session" concerns are visually grouped and separate from the
             transcript/summary/ask content below. */}
-        <div className="flex flex-col gap-4 rounded-xl border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-zinc-950 sm:p-5">
+        <div className="flex flex-col gap-4 border border-hairline bg-panel p-4 sm:p-5">
           {state.participantsSupported && !isRecording && (
-            <p className="text-xs text-zinc-500 dark:text-zinc-500">
+            <p className="max-w-3xl text-xs leading-relaxed text-muted">
               Starting will also prompt you to share a tab/screen — that&apos;s the browser&apos;s
               only way to hand a page access to audio playing on your device (the other people on
               the call). Only its audio track is used; the video track is discarded immediately
-              and never recorded, transcribed, or sent anywhere.
+              and never recorded, transcribed, or sent anywhere. Both channels are transcribed via
+              Groq using your own key.
             </p>
           )}
 
@@ -261,7 +298,7 @@ export default function Home() {
                 type="button"
                 onClick={() => void handleStart()}
                 disabled={isBusy || !groqSettings.hasApiKey}
-                className="rounded-full bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
+                className="bg-signal-amber px-5 py-2.5 text-sm font-semibold text-signal-amber-ink transition-opacity hover:opacity-90 disabled:opacity-40"
               >
                 {state.status === "requesting-mic"
                   ? "Requesting microphone…"
@@ -273,7 +310,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => void handleStop()}
-                className="rounded-full border border-red-300 px-5 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+                className="border border-signal-red px-5 py-2.5 text-sm font-semibold text-signal-red transition-colors hover:bg-signal-red/10"
               >
                 Stop meeting
               </button>
@@ -283,31 +320,19 @@ export default function Home() {
               <button
                 type="button"
                 onClick={handleNewMeeting}
-                className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-black/5 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                className="border border-hairline px-5 py-2.5 text-sm font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"
               >
                 New meeting
               </button>
             )}
 
-            {isRecording && (
-              <span className="flex items-center gap-1.5 text-sm font-medium text-red-600 dark:text-red-400">
-                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                Recording
-              </span>
-            )}
-            {(isRecording || state.status === "stopped") && (
-              <span className="font-mono text-sm text-zinc-500 dark:text-zinc-400">
-                {formatElapsed(state.elapsedSeconds)}
-              </span>
-            )}
-
             {micDevices.length > 1 && !isRecording && (
-              <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400 sm:ml-auto">
+              <label className="flex items-center gap-2 text-xs text-muted sm:ml-auto">
                 Microphone
                 <select
                   value={micDeviceId}
                   onChange={(e) => setMicDeviceId(e.target.value)}
-                  className="min-w-0 max-w-56 rounded-md border border-black/10 bg-transparent px-2 py-1 text-sm dark:border-white/10"
+                  className="min-w-0 max-w-56 border border-hairline bg-transparent px-2 py-1.5 text-xs text-foreground"
                 >
                   <option value="">Browser default</option>
                   {micDevices.map((d) => (
@@ -321,9 +346,9 @@ export default function Home() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <LevelMeter label="You (mic) — Groq" active={isRecording} stats={state.mic} />
+            <LevelMeter label="You — Mic" active={isRecording} stats={state.mic} />
             <LevelMeter
-              label="Participants (tab/system) — Groq"
+              label="Participants — Tab/System"
               active={isRecording && state.participantsActive}
               stats={state.participants}
             />
@@ -336,14 +361,16 @@ export default function Home() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
           <div className="flex min-w-0 flex-col gap-2">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Transcript</h2>
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+                Transcript
+              </h2>
               {allSegments.length > 0 && (
-                <span className="text-xs text-zinc-400">{allSegments.length} segments</span>
+                <span className="font-mono text-[11px] text-muted">{allSegments.length} segments</span>
               )}
             </div>
-            <div className="h-[24rem] overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950 lg:h-[32rem]">
+            <div className="h-[24rem] overflow-y-auto border border-hairline bg-panel p-3 lg:h-[32rem]">
               {allSegments.length === 0 ? (
-                <p className="text-sm text-zinc-400">
+                <p className="text-sm text-muted">
                   {isRecording
                     ? "Listening… each ~10s window appears here once Groq transcribes it."
                     : "Start a meeting to see a live transcript."}
@@ -352,19 +379,19 @@ export default function Home() {
                 <div className="flex flex-col gap-2">
                   {allSegments.map((segment, i) => (
                     <div key={`${segment.channel}-${segment.start}-${i}`} className="text-sm">
-                      <span className="mr-2 font-mono text-xs text-zinc-400">
+                      <span className="mr-2 font-mono text-xs text-muted">
                         {formatTimestamp(segment.start)}
                       </span>
                       <span
                         className={
                           segment.channel === "mic"
-                            ? "font-medium text-emerald-700 dark:text-emerald-400"
-                            : "font-medium text-sky-700 dark:text-sky-400"
+                            ? "font-semibold text-signal-cyan"
+                            : "font-semibold text-foreground/70"
                         }
                       >
                         {segment.channel === "mic" ? "You: " : "Participants: "}
                       </span>
-                      <span className="text-zinc-800 dark:text-zinc-200">{segment.text}</span>
+                      <span className="text-foreground/90">{segment.text}</span>
                     </div>
                   ))}
                   <div ref={transcriptEndRef} />
@@ -373,18 +400,20 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-6 lg:sticky lg:top-6">
+          <div className="flex flex-col gap-6 lg:sticky lg:top-20">
             {isFinalizingTranscript && (
-              <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
+              <Banner tone="cyan">
                 Finalizing transcript — waiting on the last audio window(s) still processing (
                 {finalizingElapsedSeconds}s and counting). Summary and Ask are disabled until this
                 settles so they don&apos;t run against a partial transcript.
-              </div>
+              </Banner>
             )}
 
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Summary</h2>
+                <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+                  Summary
+                </h2>
                 <button
                   type="button"
                   onClick={handleGenerateSummary}
@@ -394,29 +423,29 @@ export default function Home() {
                     summary.status === "loading" ||
                     isFinalizingTranscript
                   }
-                  className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                  className="border border-hairline px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-40"
                 >
                   {summary.status === "loading" ? "Generating…" : "Generate summary"}
                 </button>
               </div>
 
-              <div className="max-h-80 overflow-y-auto rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
+              <div className="max-h-80 overflow-y-auto border border-hairline bg-panel p-3">
                 {!openRouter.hasApiKey ? (
-                  <p className="text-sm text-zinc-400">
+                  <p className="text-sm text-muted">
                     Add your OpenRouter API key in Settings to enable summaries.
                   </p>
                 ) : summary.status === "error" ? (
-                  <p className="text-sm text-red-600 dark:text-red-400">{summary.errorMessage}</p>
+                  <p className="text-sm text-signal-red">{summary.errorMessage}</p>
                 ) : summary.status === "idle" ? (
-                  <p className="text-sm text-zinc-400">
+                  <p className="text-sm text-muted">
                     {allSegments.length === 0
                       ? "Record a meeting, then generate a summary."
                       : "Ready when you are."}
                   </p>
                 ) : summary.status === "loading" ? (
-                  <p className="text-sm text-zinc-400">Asking {openRouter.model}…</p>
+                  <p className="text-sm text-muted">Asking {openRouter.model}…</p>
                 ) : (
-                  <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-800 dark:text-zinc-200">
+                  <pre className="whitespace-pre-wrap font-sans text-sm text-foreground/90">
                     {summary.summary}
                   </pre>
                 )}
@@ -424,8 +453,8 @@ export default function Home() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Ask</h2>
-              <div className="rounded-lg border border-black/10 bg-white p-3 dark:border-white/10 dark:bg-zinc-950">
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Ask</h2>
+              <div className="border border-hairline bg-panel p-3">
                 <MeetingChat
                   hasApiKey={openRouter.hasApiKey}
                   messages={chat.messages}

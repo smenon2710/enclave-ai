@@ -9,6 +9,29 @@ import type { AudioChannelLabel, AudioWindow } from "./types";
 const WINDOW_MS = 10000;
 const LEVEL_POLL_MS = 100;
 
+// Windows whose peak RMS level never crosses this are skipped entirely —
+// never uploaded to Groq at all. Two real problems this fixes at once: (1)
+// cost — every window is billed by audio duration regardless of whether
+// anyone's talking, and (2) accuracy — Whisper is well-known to hallucinate
+// generic closing phrases ("Thank you.", "Thanks for watching!") on
+// near-silent audio, *confidently* (low no_speech_prob), so the existing
+// no_speech_prob/bracket-tag filter (src/lib/groq/client.ts) doesn't catch
+// it. A text-pattern blocklist for those phrases was deliberately rejected
+// as the fix — it risks dropping a real "Thank you." someone actually said,
+// the same class of silent-data-loss bug fixed previously for Web Speech's
+// interim-text handling. Gating on real signal energy before upload avoids
+// that trade-off entirely: silent audio never reaches Groq to be
+// hallucinated on in the first place.
+//
+// Deliberately conservative (real, even quiet, speech should clear this
+// easily) — biased toward "never drop real speech" over "catch every silent
+// window." One caveat: getUserMedia's autoGainControl (sources.ts) can
+// slowly amplify background noise during long silences, which could in
+// theory push a purely-noise window's peak above this threshold — a real
+// possibility, not fully solved here, but a worse outcome than the status
+// quo it replaces (paying for and hallucinating on every silent window).
+const SILENCE_PEAK_THRESHOLD = 0.01;
+
 // Tried roughly in order of preference — Opus/WebM is small and universally
 // supported in Chrome/Edge (this app's primary dual-channel target); mp4/aac
 // covers Safari, which doesn't support webm recording.
@@ -34,10 +57,13 @@ interface ChannelCapture {
   stream: MediaStream;
   sourceNode: MediaStreamAudioSourceNode;
   analyser: AnalyserNode;
-  levelPollTimer: ReturnType<typeof setInterval>;
+  levelPollTimer: ReturnType<typeof setInterval> | null;
   shouldContinue: boolean;
   restartTimer: ReturnType<typeof setTimeout> | null;
   recorder: MediaRecorder | null;
+  // Peak level seen since the current window started — reset at the top of
+  // every startWindow() call, read (and reset) when that window stops.
+  windowPeakLevel: number;
 }
 
 /**
@@ -106,28 +132,32 @@ export class MeetingAudioCapture {
     analyser.fftSize = 512;
     sourceNode.connect(analyser);
 
-    const timeDomainData = new Float32Array(analyser.fftSize);
-    const levelPollTimer = setInterval(() => {
-      analyser.getFloatTimeDomainData(timeDomainData);
-      onLevel(rms(timeDomainData));
-    }, LEVEL_POLL_MS);
-
     const channel: ChannelCapture = {
       stream,
       sourceNode,
       analyser,
-      levelPollTimer,
+      levelPollTimer: null, // assigned just below
       shouldContinue: true,
       restartTimer: null,
       recorder: null,
+      windowPeakLevel: 0,
     };
     this.channels.set(label, channel);
+
+    const timeDomainData = new Float32Array(analyser.fftSize);
+    channel.levelPollTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(timeDomainData);
+      const level = rms(timeDomainData);
+      onLevel(level);
+      channel.windowPeakLevel = Math.max(channel.windowPeakLevel, level);
+    }, LEVEL_POLL_MS);
 
     const mimeType = pickSupportedMimeType();
     const MAX_START_RETRIES = 3;
 
     const startWindow = (retryCount = 0) => {
       if (!channel.shouldContinue) return;
+      channel.windowPeakLevel = 0;
 
       const chunks: Blob[] = [];
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
@@ -138,7 +168,9 @@ export class MeetingAudioCapture {
       };
 
       recorder.onstop = () => {
-        if (chunks.length > 0) {
+        // Read before the next window's startWindow() resets it below.
+        const peakLevel = channel.windowPeakLevel;
+        if (chunks.length > 0 && peakLevel >= SILENCE_PEAK_THRESHOLD) {
           onWindow({
             channel: label,
             blob: new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" }),
@@ -202,7 +234,7 @@ export class MeetingAudioCapture {
     // "flush" call needed — unlike the old whisper pipeline's flushAll()).
     channel.shouldContinue = false;
     if (channel.restartTimer) clearTimeout(channel.restartTimer);
-    clearInterval(channel.levelPollTimer);
+    if (channel.levelPollTimer) clearInterval(channel.levelPollTimer);
     channel.sourceNode.disconnect();
     channel.analyser.disconnect();
 

@@ -1,26 +1,66 @@
 @import "tailwindcss";
 
+/*
+ * Design system: "studio console" — Enclave AI reframed as a precision
+ * recording instrument rather than a generic chat-app-style AI tool.
+ * Graphite/paper surfaces, hairline dividers, sharp/minimal-radius geometry,
+ * and two signal colors (amber = recording/primary, cyan = data/processing)
+ * that mirror real broadcast/studio hardware conventions rather than an
+ * arbitrary brand palette. All numeric/technical readouts use the mono
+ * face — see layout.tsx / this file's --font-mono.
+ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f3f4f6;
+  --foreground: #14171c;
+  --panel: #ffffff;
+  --panel-raised: #e9ebef;
+  --hairline: #dadde3;
+  --muted: #667085;
+  --signal-amber: #b9791f;
+  --signal-amber-ink: #ffffff;
+  --signal-cyan: #2f7a89;
+  --signal-red: #c93a32;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-panel: var(--panel);
+  --color-panel-raised: var(--panel-raised);
+  --color-hairline: var(--hairline);
+  --color-muted: var(--muted);
+  --color-signal-amber: var(--signal-amber);
+  --color-signal-amber-ink: var(--signal-amber-ink);
+  --color-signal-cyan: var(--signal-cyan);
+  --color-signal-red: var(--signal-red);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0b0d10;
+    --foreground: #e7e9ed;
+    --panel: #14171c;
+    --panel-raised: #1b1f26;
+    --hairline: #262b33;
+    --muted: #8b93a3;
+    --signal-amber: #e8a33d;
+    --signal-amber-ink: #241505;
+    --signal-cyan: #5eb8c7;
+    --signal-red: #e5484d;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Tabular figures everywhere numbers appear in the mono face, so
+   fast-changing readouts (elapsed time, levels) don't jitter width. */
+.font-mono {
+  font-variant-numeric: tabular-nums;
 }

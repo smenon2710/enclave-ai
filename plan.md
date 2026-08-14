@@ -216,3 +216,69 @@ This is a personal-use tool: no participant-facing consent UI is in scope (§5, 
 * `tsc --noEmit` and `eslint` both clean after the full rewrite and file removals; no stray references to any deleted module remain (verified by grep, not just by the type-checker passing).
 
 **Not yet verified — needs a real Groq key and a real meeting:** actual transcription accuracy/quality from Groq (this environment has no real key to test against); Participants-channel behavior specifically (macOS's Screen Recording permission blocked automated `getDisplayMedia` testing in this environment too, same limitation encountered during the earlier local-whisper work — see the removed `wasm-build/README.md`'s benchmark history for the prior occurrence); whether 10s windows feel appropriately "live" in practice, or whether that should be tuned shorter/longer after real use.
+
+**Post-migration fix — silence-gating (see real-user feedback after the first live test):** the first real recording (headphone mic, real Groq key) surfaced two more things. (1) Whisper is well-known to hallucinate generic closing phrases ("Thank you.", "Thanks for watching!") on near-silent audio — confidently, with *low* `no_speech_prob`, so the existing filter never catches it (only high-`no_speech_prob`/bracket-tag hallucinations like `[BLANK_AUDIO]` are caught). A text blocklist was deliberately rejected as the fix, since it risks dropping a real "Thank you." someone actually said — the same silent-data-loss failure mode fixed for Web Speech's interim text in the earlier local-whisper era. (2) Every ~10s window was being uploaded and billed regardless of whether anyone was talking, on both channels, for the whole meeting. Fixed both at once: `src/lib/audio/capture.ts` now tracks each window's peak RMS level (already computed for the live level meter) and simply never uploads a window whose peak never crosses `SILENCE_PEAK_THRESHOLD` — silent audio never reaches Groq to be hallucinated on, and isn't billed. Verified with a Playwright test: a pure-digital-silence window produces zero Groq requests; a real-speech window still uploads normally. Caveat carried into this fix, not fully solved: `getUserMedia`'s `autoGainControl` can slowly amplify background noise during long silences, which could in theory push a purely-noise window's peak above the threshold — a real possibility, judged a much better failure mode than the status quo it replaces.
+
+---
+
+## 10. Subscription Pricing Model (If Productized)
+
+**This app is not currently for sale — it's a personal tool.** This section exists because the user asked for it as a standing reference, to be updated as real Groq/OpenRouter usage data comes in from actual use (the numbers below are estimates with explicit assumptions, not measured). Two fundamentally different business models are possible depending on who holds the API keys; they have very different risk and pricing profiles, so both are modeled separately rather than picking one.
+
+### 10.1 The architectural fork this decision depends on
+
+* **Model A — BYOK (this app's current architecture, unchanged).** Users paste their own Groq + OpenRouter keys; nothing is proxied through infrastructure this app operates. A subscription here would **not** be paying for AI usage at all — the user already pays Groq/OpenRouter directly. It would only be paying for the software, hosting, and ongoing maintenance. Lower risk (no liability for holding customer API keys or usage overages), lower revenue ceiling, much simpler pricing.
+* **Model B — Managed/bundled.** The operator holds shared API keys, proxies every request through infrastructure they run, meters usage per customer, and charges one all-in price. This requires real infrastructure that doesn't exist today (an authenticated backend, per-customer usage metering, billing integration) — a materially different, riskier product, not a pricing tweak. Modeled below because the user asked for API costs to be broken out, which only makes sense under this model.
+
+### 10.2 Cost breakdown (Model B assumptions)
+
+**API costs — variable, per user, scales with actual meeting volume.** Groq turbo model (~$0.04/hour of audio, the default) billed on *post-silence-gate* audio (§9's fix), not raw session duration — both channels run concurrently, so a fully-talkative 1-hour meeting bills up to ~2 hours of audio; real meetings have gaps, so effective billed time is usually meaningfully less.
+
+| Usage tier | Meeting hours/mo | Est. billed audio/mo (channels combined, ~65% active) | Groq cost/mo (turbo) | OpenRouter summaries (paid-tier estimate) | Total variable/mo |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Light | 5 hrs | ~6.5 hrs | ~$0.26 | ~$0.30 (10 summaries × $0.03) | **~$0.56** |
+| Medium | 20 hrs | ~26 hrs | ~$1.04 | ~$1.20 (40 summaries) | **~$2.24** |
+| Heavy | 60 hrs | ~78 hrs | ~$3.12 | ~$1.80 (60 summaries) | **~$4.92** |
+
+(OpenRouter cost assumes a paid model; using the app's own default, `openrouter/free`, this column is $0 — the free-tier router is deliberately the shipped default for exactly this reason, see §5 Phase 3.)
+
+**Infra costs — mostly fixed, near-zero at small scale.** This app's own architecture is unusually cheap to host precisely because it does almost nothing server-side (§1's "$0 Operating Cost" principle, still true under Model A, mostly true under Model B): no database (IndexedDB is client-side), no server-side transcription/LLM compute (both are direct browser-to-provider calls). Vercel's free tier plausibly covers a meaningful user base before the $20/mo Pro tier is needed; add ~$1/mo domain, and optionally ~$0-26/mo error monitoring (e.g. Sentry) once there are real users to monitor.
+
+**Maintenance costs — the actual dominant cost, by a wide margin, at any realistic small-scale user count.** This is a labor cost, not an infrastructure cost, and estimating it honestly matters more than the API numbers above: ongoing dependency updates, bug fixes, adapting to Groq/OpenRouter API changes, browser-compatibility drift, and support. Estimated at 10-20 hours/month for a stable, mature product at small scale, valued at a blended contractor rate of $75-150/hr:
+
+| Scope | Hours/mo | Rate | Cost/mo |
+| :--- | :--- | :--- | :--- |
+| Light maintenance (stable product, few users) | 10 | $75/hr | $750 |
+| Active maintenance (growing product, real support load) | 20 | $150/hr | $3,000 |
+
+### 10.3 Break-even and suggested pricing
+
+Fixed monthly cost (infra + maintenance, Model B) lands roughly in the **$800-3,050/month** range depending on how much active maintenance the product actually needs — maintenance dominates that range, not infra. Subscribers needed to break even, at a few illustrative price points (fixed-cost side only; variable API cost per user is small enough at any of these tiers — under $5/mo even for heavy users — that it doesn't change the required subscriber count much, but should still be subtracted from each subscriber's contribution margin):
+
+| Price/mo | Subscribers to cover $800/mo (light maintenance) | Subscribers to cover $3,050/mo (active maintenance) |
+| :--- | :--- | :--- |
+| $9 | ~89 | ~339 |
+| $19 | ~42 | ~161 |
+| $29 | ~28 | ~106 |
+
+**Recommendation, if this were ever productized:** ship **Model A (BYOK)** first, not Model B. It sidesteps the entire variable-API-cost column, the liability of holding customer keys, and usage-metering/billing engineering — the same reasons this app already works this way for OpenRouter. A BYOK subscription only needs to clear infra + maintenance, which is a much smaller, more predictable number than Model B's — plausibly justifying a lower price point (e.g. $5-9/month) purely for the packaged software/support, or staying free/personal as it is today. Model B only becomes worth the added risk and engineering if there's real demand from users who specifically don't want to manage their own API keys — not something to build speculatively.
+
+---
+
+## 11. Speaker Diarization — Scoped, Not Implemented
+
+Confirmed directly against Groq's docs (§9): **no diarization support at all**, same limitation OpenAI's Whisper API has generally. This was already a known v1 limitation before the Groq migration (§2's original "Diarization: None in v1" row) and the migration didn't change it — Participants is, and has always been, one undifferentiated stream, not per-speaker-labeled. This section scopes what actually adding it would take, without committing to building it.
+
+### 11.1 The ceiling this app is already up against
+
+This was flagged once before, in the local-whisper era (§4.10, "Where this architecture's ceiling actually is"), and it applies just as much to any diarization approach: `getDisplayMedia` tab/system-audio capture only ever sees **already-mixed** output audio — post-AEC, post-jitter-buffering, post-mixing by whatever Zoom/Teams/Meet client is running. By the time this app's Participants stream exists, every other call participant's voice is already blended into one channel. Diarizing a pre-mixed stream is a fundamentally harder, less reliable problem than diarizing separate per-participant streams — which is what a real "meeting bot" with platform API access would get (Teams' own server-side model works this way, per the earlier research). **No diarization model or service fixes this — it's a limitation of where in the pipeline this app captures from, not of the model**, and becoming a meeting bot to fix it was already explicitly declined (§1, "No Meeting Bots"). Any diarization work here should be scoped with that ceiling as an explicit, stated expectation up front, not discovered after building it: expect real accuracy limits on the Participants channel specifically that wouldn't exist on, say, a multi-mic in-room recording.
+
+### 11.2 Options
+
+1. **Client-side diarization model (WASM/ONNX).** A speaker-embedding/clustering model (e.g. a pyannote-family model exported to ONNX, run via `onnxruntime-web` or a Rust/`wasm-bindgen` port) running entirely in-browser, clustering the Participants stream into "Speaker 1 / Speaker 2 / …" labels without real identities. Consistent with this app's original architectural preference (§2's Diarization row already named this as the "Future" direction) and with the BYOK/no-server-we-control principle — no new API key, no new vendor. Real cost: another WASM pipeline to build, ship, and maintain, with the exact category of build/runtime debugging this project already spent two full local-whisper.cpp sessions on (§4, §9) — not a small undertaking, and the model would need to run over the *pre-mixed* Participants stream with the ceiling above already priced in to expectations.
+2. **Cloud diarization API (BYOK, matching the Groq/OpenRouter pattern).** Services like AssemblyAI or Deepgram offer diarization as part of their transcription response. Fits this app's established BYOK pattern (another optional Settings API key, same shape as Groq/OpenRouter) with much less engineering than option 1 — but is a new vendor/cost surface, and would mean either running transcription twice (once via Groq, once via the diarization vendor) or replacing Groq for Participants specifically with a diarization-capable provider, which reopens the whole "which model transcribes best" evaluation for that channel.
+3. **Heuristic speaker-turn segmentation (no new model or vendor).** Detect probable speaker changes from pause length and/or pitch shifts in the existing audio, splitting Participants text into "Speaker A / Speaker B" turns without true identity — cheapest to build, but isn't real diarization (can't tell you it's the *same* Speaker A again three segments later with any confidence) and would likely disappoint if presented as more than a rough turn-by-turn split.
+
+### 11.3 Not scoped further than this
+
+No recommendation is being made between these three — that's a real product decision (engineering cost vs. accuracy expectations vs. new-vendor risk) that should happen separately from this write-up, with the §11.1 ceiling clearly understood going in either way. Not started; no code changes accompany this section.
