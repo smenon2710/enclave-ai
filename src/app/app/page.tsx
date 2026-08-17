@@ -14,6 +14,7 @@ import type { AudioWindow } from "@/lib/audio/types";
 import { SettingsModal } from "@/components/SettingsModal";
 import { HistoryModal } from "@/components/HistoryModal";
 import { MeetingChat } from "@/components/MeetingChat";
+import { MarkdownSummary } from "@/components/MarkdownSummary";
 
 function formatElapsed(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
@@ -382,7 +383,10 @@ export default function Home() {
               ) : (
                 <div className="flex flex-col gap-2">
                   {allSegments.map((segment, i) => (
-                    <div key={`${segment.channel}-${segment.start}-${i}`} className="text-sm">
+                    <div
+                      key={`${segment.channel}-${segment.start}-${i}`}
+                      className="text-sm leading-relaxed"
+                    >
                       <span className="mr-2 font-mono text-xs text-muted">
                         {formatTimestamp(segment.start)}
                       </span>
@@ -449,9 +453,7 @@ export default function Home() {
                 ) : summary.status === "loading" ? (
                   <p className="text-sm text-muted">Asking {openRouter.model}…</p>
                 ) : (
-                  <pre className="whitespace-pre-wrap font-sans text-sm text-foreground/90">
-                    {summary.summary}
-                  </pre>
+                  summary.summary && <MarkdownSummary text={summary.summary} />
                 )}
               </div>
             </div>

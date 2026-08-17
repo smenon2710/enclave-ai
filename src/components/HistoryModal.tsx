@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import type { MeetingRecord } from "@/lib/history/types";
 import { downloadTextFile, toJson, toMarkdown, toPlainText } from "@/lib/history/export";
 import { useStorageQuota } from "@/hooks/useStorageQuota";
+import { MarkdownSummary } from "@/components/MarkdownSummary";
 
 interface HistoryModalProps {
   onClose: () => void;
@@ -221,9 +222,7 @@ export function HistoryModal({
                             <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
                               Summary
                             </h3>
-                            <pre className="whitespace-pre-wrap font-sans text-sm text-foreground/90">
-                              {meeting.summary}
-                            </pre>
+                            <MarkdownSummary text={meeting.summary} />
                           </div>
                         )}
 
@@ -235,7 +234,10 @@ export function HistoryModal({
                             .slice()
                             .sort((a, b) => a.start - b.start)
                             .map((seg, i) => (
-                              <div key={`${seg.channel}-${seg.start}-${i}`}>
+                              <div
+                                key={`${seg.channel}-${seg.start}-${i}`}
+                                className="leading-relaxed"
+                              >
                                 <span
                                   className={
                                     seg.channel === "mic"

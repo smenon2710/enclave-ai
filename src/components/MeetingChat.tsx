@@ -53,8 +53,8 @@ export function MeetingChat({
               key={i}
               className={
                 m.role === "user"
-                  ? "self-end max-w-[85%] bg-foreground px-3 py-1.5 text-sm text-background"
-                  : "self-start max-w-[85%] bg-panel-raised px-3 py-1.5 text-sm text-foreground/90"
+                  ? "self-end max-w-[85%] bg-foreground px-3 py-1.5 text-sm leading-relaxed text-background"
+                  : "self-start max-w-[85%] bg-panel-raised px-3 py-1.5 text-sm leading-relaxed text-foreground/90"
               }
             >
               {m.content}
